@@ -1,0 +1,48 @@
+# Global random seed to ensure reproducibility (affects UMAP, GMM initialization, etc.)
+random_seed: 42
+
+# Default project paths used by all modules
+paths:
+  data: data         # Folder containing raw or preprocessed datasets
+  models: models     # Folder to store trained models (UMAP, GMM, KDE)
+  results: results   # Folder where final outputs, rankings, and logs are saved
+
+# Core pipeline configuration
+pipeline:
+  top_k: 100                      # Number of top candidates kept for manual validation
+  score_weights:                  # Relative weights assigned to each scoring module
+    cross_correlation: 0.5        # Density-based filter (UMAP + KDE)
+    frequency: 0.3                # Frequency-based filter (GMM)
+    similarity: 0.2               # ON/OFF similarity filter
+
+# Configuration of each calculator (modular plug-ins)
+calculators:
+
+  cross_correlation:
+    enabled: true
+    bandwidth: 0.30               # Kernel bandwidth for KDE density estimation
+                                  # Controls smoothing of the 2D UMAP embedding:
+                                  # lower (~0.2) = more sensitive but noisier;
+                                  # higher (~0.4) = more stable but less sensitive.
+
+  frequency:
+    enabled: true
+    gmm:
+      n_components: 3             # Number of Gaussian components (typical spectral regions: strong, moderate, clean RFI)
+      covariance_type: full       # Full covariance gives flexible elliptical clusters
+      init_params: kmeans         # Standard initialization method in scikit-learn
+      max_iter: 200               # Maximum training iterations
+      tol: 1e-3                   # Convergence tolerance; both are standard defaults ensuring stable optimization
+
+  similarity:
+    enabled: true
+    metric: "corr"                # Similarity metric between ON and OFF patches:
+                                  # "corr" = normalized correlation (0 = different, 1 = identical)
+                                  # "ssim" = structural similarity index (more sensitive to shape)
+    threshold: 0.30               # Empirical correlation threshold:
+                                  # correlations below 0.30 are considered dissimilar (potential anomalies)
+
+# Logging parameters
+logging:
+  level: INFO                     # Log verbosity level: DEBUG, INFO, WARNING, ERROR
+  file: results/run.log           # Path of the main log file (also mirrored on console)
