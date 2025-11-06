@@ -105,17 +105,6 @@
             <mxPoint x="50" y="200" as="sourcePoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="lTcii76pKF0bdEDt2nlr-122" value="" style="html=1;verticalAlign=bottom;labelBackgroundColor=none;endArrow=block;endFill=1;dashed=1;rounded=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="lTcii76pKF0bdEDt2nlr-80">
-          <mxGeometry width="160" relative="1" as="geometry">
-            <mxPoint x="225" y="130" as="sourcePoint" />
-            <mxPoint x="55" y="130" as="targetPoint" />
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="lTcii76pKF0bdEDt2nlr-123" value="analysisResults" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" connectable="0" vertex="1" parent="lTcii76pKF0bdEDt2nlr-122">
-          <mxGeometry x="0.115" y="-1" relative="1" as="geometry">
-            <mxPoint x="9" y="1" as="offset" />
-          </mxGeometry>
-        </mxCell>
         <mxCell id="lTcii76pKF0bdEDt2nlr-96" value="" style="html=1;verticalAlign=bottom;labelBackgroundColor=none;endArrow=block;endFill=1;rounded=0;" edge="1" parent="lTcii76pKF0bdEDt2nlr-80">
           <mxGeometry width="160" relative="1" as="geometry">
             <mxPoint x="-130" y="80" as="sourcePoint" />
