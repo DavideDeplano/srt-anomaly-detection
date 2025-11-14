@@ -1,26 +1,44 @@
-"""
-Logger management module.
+# src/srtad/utils/logger.py
 
-Provides a centralized logger configuration for the entire project.
-Logging parameters (level, output file) are read from config/default.yaml.
-"""
-
-from pathlib import Path
 import logging
+from pathlib import Path
 
-def setup_logger(cfg: dict) -> None:
-    """Configure project-wide logging from YAML config."""
-    log_cfg = cfg.get("logging", {})
-    level = getattr(logging, str(log_cfg.get("level", "INFO")).upper(), logging.INFO)
-    log_file = Path(str(log_cfg.get("file", "results/run.log")))
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+def setup_logger(name: str = "srtad", level: str = "INFO", file: str | None = None):
+    """
+    Configure the central project logger.
 
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-        force=True,
-    )
+    - Adds a console handler
+    - Adds a file handler (optional)
+    - Prevents duplicate handlers if called multiple times
+    """
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level.upper())
+
+    # Avoid double handlers if the function is called again
+    if logger.handlers:
+        return logger
+
+    # Formatter
+    fmt = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt)
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(level.upper())
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    # File handler (optional)
+    if file:
+        path = Path(file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        fh = logging.FileHandler(path, encoding="utf-8")
+        fh.setLevel(level.upper())
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
+    logger.propagate = False
+    return logger
