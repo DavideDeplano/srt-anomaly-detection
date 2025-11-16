@@ -4,8 +4,10 @@ setlocal
 REM --- CONFIG: path to Miniconda/Anaconda ---
 set "CONDA_ROOT=%USERPROFILE%\miniconda3"
 
-REM Run the main module inside the 'srt-anom' environment
-REM %* passes any additional arguments to the Python program
-call "%CONDA_ROOT%\condabin\conda.bat" run -n srt-anom python -m src.srtad.main %*
+REM Activate environment (mandatory for interactive input)
+call "%CONDA_ROOT%\condabin\conda.bat" activate srt-anom
+
+REM Run main module normally (interactive OK)
+python -m src.srtad.main %*
 
 endlocal
