@@ -40,7 +40,7 @@ class Candidate:
 
         # --- Scores from filters ---
         # PAPER-ALIGNED: density, frequency, similarity
-        self._log_density: float | None = None
+        self._density_score: float | None = None
         self._frequency_score: float | None = None
         self._similarity_score: float | None = None
 
@@ -73,12 +73,12 @@ class Candidate:
     # ========================
 
     @property
-    def density_log_density(self) -> float | None:
-        return self._log_density
+    def density_score(self) -> float | None:
+        return self._density_score
 
-    def set_log_density(self, value: float) -> None:
+    def set_density_score(self, value: float) -> None:
         """Assign the density score (UMAP+KDE-based)."""
-        self._log_density = float(value)
+        self._density_score = float(value)
 
     @property
     def frequency_score(self) -> float | None:
