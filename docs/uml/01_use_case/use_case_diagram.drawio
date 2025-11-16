@@ -1,4 +1,4 @@
-<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" version="28.2.9">
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36" version="29.0.2">
   <diagram name="Page-1" id="VfUMSfKNzYAyYTnu1FbL">
     <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
       <root>
@@ -49,26 +49,20 @@
         <mxCell id="hfD67W0GYP6PNa7jHJ7f-2" value="Elaborare dataset e generare candidati" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="550" y="180" width="140" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="hfD67W0GYP6PNa7jHJ7f-3" value="Calcolare cross correlation" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="hfD67W0GYP6PNa7jHJ7f-3" value="Filtraggio per similarità" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="820" y="420" width="140" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="hfD67W0GYP6PNa7jHJ7f-4" value="Calcolare frequenza" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="hfD67W0GYP6PNa7jHJ7f-4" value="Filtraggio per frequenza" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="610" y="420" width="140" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="hfD67W0GYP6PNa7jHJ7f-5" value="Calcolare similarity ON/OFF" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="hfD67W0GYP6PNa7jHJ7f-5" value="Filtraggio per densità" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="390" y="414" width="140" height="70" as="geometry" />
         </mxCell>
         <mxCell id="hfD67W0GYP6PNa7jHJ7f-6" value="Generare ranking e ispezionare Top-K" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="620" y="620" width="140" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="hfD67W0GYP6PNa7jHJ7f-7" value="Gestire modelli (UMAP/KDE/GMM)" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+        <mxCell id="hfD67W0GYP6PNa7jHJ7f-7" value="Gestire filtri e modelli" style="ellipse;whiteSpace=wrap;html=1;" vertex="1" parent="1">
           <mxGeometry x="600" y="280" width="140" height="70" as="geometry" />
-        </mxCell>
-        <mxCell id="hfD67W0GYP6PNa7jHJ7f-8" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;" style="html=1;verticalAlign=bottom;labelBackgroundColor=none;endArrow=open;endFill=0;dashed=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="hfD67W0GYP6PNa7jHJ7f-6" target="hfD67W0GYP6PNa7jHJ7f-5">
-          <mxGeometry width="160" relative="1" as="geometry">
-            <mxPoint x="490" y="530" as="sourcePoint" />
-            <mxPoint x="650" y="530" as="targetPoint" />
-          </mxGeometry>
         </mxCell>
         <mxCell id="z3a_DySjsFmqqXH8R3mF-3" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;" style="html=1;verticalAlign=bottom;labelBackgroundColor=none;endArrow=open;endFill=0;dashed=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="hfD67W0GYP6PNa7jHJ7f-6" target="hfD67W0GYP6PNa7jHJ7f-4">
           <mxGeometry width="160" relative="1" as="geometry">
