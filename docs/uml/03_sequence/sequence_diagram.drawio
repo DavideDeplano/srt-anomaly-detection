@@ -5,7 +5,7 @@
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
         <mxCell id="lTcii76pKF0bdEDt2nlr-1" value="&lt;font style=&quot;font-size: 30px;&quot;&gt;Sequence Diagram – SRT Anomaly Detection&lt;/font&gt;" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
-          <mxGeometry x="280" y="50" width="610" height="30" as="geometry" />
+          <mxGeometry x="500" y="50" width="610" height="30" as="geometry" />
         </mxCell>
         <mxCell id="lTcii76pKF0bdEDt2nlr-78" value="" style="group" connectable="0" vertex="1" parent="1">
           <mxGeometry x="620" y="160" width="430" height="320" as="geometry" />
