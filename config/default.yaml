@@ -1,48 +1,106 @@
-# Global random seed to ensure reproducibility (affects UMAP, GMM initialization, etc.)
 random_seed: 42
 
-# Default project paths used by all modules
+# Project paths
 paths:
-  data: data         # Folder containing raw or preprocessed datasets
-  models: models     # Folder to store trained models (UMAP, GMM, KDE)
-  results: results   # Folder where final outputs, rankings, and logs are saved
+  data: data                    # Raw and preprocessed datasets
+  models: models                # Stored models (UMAP, KDE, GMM, etc.)
+  results: results              # Output files, rankings, figures
+  logs: logs                    # Log files
 
-# Core pipeline configuration
+simulation:
+  output_dir: "simulated/cadences"
+
+  # Number of base panel sets (each expanded into mask_combinations cadences)
+  n_panel_sets: 20
+
+  # Frame parameters for synthetic panels
+  fchans: 80
+  tchans: 16
+  df_hz: 2.75
+  dt_s: 18.75
+  fch1_mhz: 1420.0
+  noise_mean: 10
+  noise_type: "chi2"
+
+  # Signal parameter ranges
+  amplitude_factor: [0.0, 4.0]
+  drift_rate_hz_s: [-4.0, 4.0]
+  width_hz: [20.0, 80.0]
+
+  # Cadence structure
+  panels_per_cadence: 6          # 3 ON + 3 OFF
+  mask_combinations: 64          # 2^6
+
+# Pipeline configuration
 pipeline:
-  top_k: 100                      # Number of top candidates kept for manual validation
-  score_weights:                  # Relative weights assigned to each scoring module
-    cross_correlation: 0.5        # Density-based filter (UMAP + KDE)
-    frequency: 0.3                # Frequency-based filter (GMM)
-    similarity: 0.2               # ON/OFF similarity filter
+  top_k: 100                     # Number of top candidates to export
+  score_weights:                 # Relative weights for each filter
+    cross_correlation: 0.5
+    frequency: 0.3
+    similarity: 0.2
 
-# Configuration of each calculator (modular plug-ins)
-calculators:
+# Filters configuration
+filters:
 
-  cross_correlation:
-    enabled: true
-    bandwidth: 0.30               # Kernel bandwidth for KDE density estimation
-                                  # Controls smoothing of the 2D UMAP embedding:
-                                  # lower (~0.2) = more sensitive but noisier;
-                                  # higher (~0.4) = more stable but less sensitive.
+  # -------------------------------------------------------------
+  # Density filter (UMAP + KDE on 15-D CC features)
+  # -------------------------------------------------------------
+  density:
+    # UMAP hyperparameters
+    n_neighbors: 25
+    min_dist: 0.01
+    umap_metric: "canberra"
+    n_components: 2
 
+    # KDE hyperparameters
+    kde_bandwidth: 0.30
+    kernel: "exponential"
+
+    # Category configuration
+    threshold: 0.0618             # Threshold for only-on class detection
+    only_on_category: 0           # Pattern ID used as "clean" class
+
+    # Path
+    umap_model_path: "models/umap_density.pkl"
+    kde_models_dir: "models/kde_density/"
+
+  # -------------------------------------------------------------
+  # Frequency filter (GMM bagging on per-band frequencies)
+  # -------------------------------------------------------------
   frequency:
-    enabled: true
-    gmm:
-      n_components: 3             # Number of Gaussian components (typical spectral regions: strong, moderate, clean RFI)
-      covariance_type: full       # Full covariance gives flexible elliptical clusters
-      init_params: kmeans         # Standard initialization method in scikit-learn
-      max_iter: 200               # Maximum training iterations
-      tol: 1e-3                   # Convergence tolerance; both are standard defaults ensuring stable optimization
+    # Number of GMM components per band
+    n_components_L: 200
+    n_components_S: 200
+    n_components_C: 50
 
+    # Bagging settings
+    n_bags: 10                    # Number of GMMs per band
+    bag_size: 5000                # Size of each subsample
+
+    # Scoring options
+    invert_density: true          # Higher = more anomalous
+    rescale_0_1: true             # Normalize final score in [0,1]
+
+    # Path
+    gmm_model_path: "models/gmm_frequency.joblib"
+
+  # -------------------------------------------------------------
+  # Similarity filter (UMAP on downsampled panels)
+  # -------------------------------------------------------------
   similarity:
-    enabled: true
-    metric: "corr"                # Similarity metric between ON and OFF patches:
-                                  # "corr" = normalized correlation (0 = different, 1 = identical)
-                                  # "ssim" = structural similarity index (more sensitive to shape)
-    threshold: 0.30               # Empirical correlation threshold:
-                                  # correlations below 0.30 are considered dissimilar (potential anomalies)
+    # UMAP hyperparameters
+    n_neighbors: 25
+    min_dist: 0.01
+    umap_metric: "euclidean"      # 2D embedding of the 6 panels
+    n_components: 2
 
-# Logging parameters
+    #Path
+    umap_model_path: "models/umap_similarity.joblib"
+
+    # Scoring options
+    rescale_0_1: true             # Normalize similarity score in [0,1]
+
+# Logging
 logging:
-  level: INFO                     # Log verbosity level: DEBUG, INFO, WARNING, ERROR
-  file: results/run.log           # Path of the main log file (also mirrored on console)
+  level: INFO
+  file: logs/run.log
