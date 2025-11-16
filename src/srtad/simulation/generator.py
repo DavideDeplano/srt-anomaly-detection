@@ -1,0 +1,167 @@
+from astropy import units as u
+import setigen as stg
+import numpy as np
+from pathlib import Path
+import csv
+from ..config import simulation as sim_cfg, paths, random_seed
+import logging
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
+logger = logging.getLogger("srtad.simulation")
+
+SLOT_TYPES = ["A", "B", "A", "C", "A", "D"]
+
+
+class SimulationGenerator:
+    def __init__(self):
+        self.sim = sim_cfg
+        self.data_dir = Path(paths["data"])
+        self.output_dir = self.data_dir / sim_cfg["output_dir"]
+        self.seed = int(random_seed)
+
+    def run(self):
+        # === Se la cartella esiste ed è già piena di cadences, salta ===
+        # (prima ancora di leggere parametri inutilmente)
+        if self.output_dir.exists():
+            existing = list(self.output_dir.glob("cadence_*_pattern*.npy"))
+            if len(existing) > 0:
+                logger.info(
+                    f"Found {len(existing)} existing cadence files in {self.output_dir}. "
+                    "Assuming synthetic dataset already generated; skipping."
+                )
+                return
+
+        # Se arrivi qui, significa che:
+        # - la cartella non esiste, oppure
+        # - esiste ma è vuota → puoi generare da zero
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # === leggi parametri dalla config ===
+        n_panel_sets = int(self.sim["n_panel_sets"])
+        panels_per_cadence = int(self.sim["panels_per_cadence"])
+        mask_combinations = int(self.sim["mask_combinations"])
+
+        tchans = int(self.sim["tchans"])
+        fchans = int(self.sim["fchans"])
+
+        noise_mean = float(self.sim["noise_mean"])
+        noise_type = self.sim["noise_type"]
+
+        amplitude_factor_range = tuple(self.sim["amplitude_factor"])
+        drift_rate_range = tuple(self.sim["drift_rate_hz_s"])
+        width_hz_range = tuple(self.sim["width_hz"])
+
+        df_hz = float(self.sim["df_hz"])
+        dt_s = float(self.sim["dt_s"])
+        fch1_mhz = float(self.sim["fch1_mhz"])
+
+        # === controlli di consistenza ===
+        if panels_per_cadence != len(SLOT_TYPES):
+            raise ValueError(
+                f"panels_per_cadence={panels_per_cadence}, ma SLOT_TYPES ne ha {len(SLOT_TYPES)}"
+            )
+
+        rng = np.random.default_rng(self.seed)
+
+        logger.info(
+            f"Generating {n_panel_sets} panel-sets → {n_panel_sets * mask_combinations} cadences"
+        )
+
+        log_path = self.output_dir / "cadences_log.csv"
+        fieldnames = [
+            "cadence_id", "pattern_id", "slot", "slot_type",
+            "on", "amplitude_factor", "drift_rate_hz_s", "width_hz",
+            "f_start_mhz", "f_start_idx",
+            "tchans", "fchans", "df_hz", "dt_s", "fch1_mhz",
+            "noise_mean", "noise_type", "random_seed",
+        ]
+
+        with log_path.open("w", newline="") as log_f:
+            writer = csv.DictWriter(log_f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            iterator = tqdm(range(n_panel_sets), desc="Panel-sets") if tqdm else range(n_panel_sets)
+
+            for cadence_id in iterator:
+                batch_seed = self.seed + cadence_id
+
+                # === genera pannelli base ===
+                base_panels = []
+                base_freqs = []
+
+                for slot in range(panels_per_cadence):
+                    np.random.seed(batch_seed * panels_per_cadence + slot)
+
+                    frame = stg.Frame(
+                        fchans=fchans,
+                        tchans=tchans,
+                        df=df_hz,
+                        dt=dt_s,
+                        fch1=fch1_mhz,
+                    )
+                    frame.add_noise(x_mean=noise_mean, noise_type=noise_type)
+                    base_panels.append(frame)
+
+                    f_idx = int(rng.integers(0, fchans))
+                    base_freqs.append(f_idx)
+
+                # === pattern (0..63) = combinazioni ON/OFF ===
+                for pattern_id in range(mask_combinations):
+                    bits = [(pattern_id >> k) & 1 for k in range(panels_per_cadence)]
+                    panels = []
+
+                    for slot in range(panels_per_cadence):
+                        frame = base_panels[slot].copy()
+                        f_idx = base_freqs[slot]
+
+                        f_start = frame.get_frequency(index=f_idx)
+                        f_start_mhz = float(f_start)
+
+                        on_flag = bool(bits[slot])
+
+                        amp = drift = width = 0.0
+
+                        if on_flag:
+                            amp = float(rng.uniform(*amplitude_factor_range))
+                            drift = float(rng.uniform(*drift_rate_range))
+                            width = float(rng.uniform(*width_hz_range))
+
+                            frame.add_signal(
+                                stg.constant_path(f_start=f_start, drift_rate=drift),
+                                stg.constant_t_profile(level=frame.get_intensity(snr=amp * 10)),
+                                stg.gaussian_f_profile(width=width),
+                                stg.constant_bp_profile(level=1.0),
+                            )
+
+                        panels.append(frame.data.copy())
+
+                        writer.writerow({
+                            "cadence_id": f"cadence_{cadence_id:05d}",
+                            "pattern_id": pattern_id,
+                            "slot": slot,
+                            "slot_type": SLOT_TYPES[slot],
+                            "on": int(on_flag),
+                            "amplitude_factor": amp,
+                            "drift_rate_hz_s": drift,
+                            "width_hz": width,
+                            "f_start_mhz": f_start_mhz,
+                            "f_start_idx": f_idx,
+                            "tchans": tchans,
+                            "fchans": fchans,
+                            "df_hz": df_hz,
+                            "dt_s": dt_s,
+                            "fch1_mhz": fch1_mhz,
+                            "noise_mean": noise_mean,
+                            "noise_type": noise_type,
+                            "random_seed": batch_seed,
+                        })
+
+                    tensor = np.stack(panels, axis=0)
+                    out_path = self.output_dir / f"cadence_{cadence_id:05d}_pattern{pattern_id:02d}.npy"
+                    np.save(out_path, tensor)
+
+        logger.info("Synthetic dataset generated.")
