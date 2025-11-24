@@ -246,6 +246,11 @@ class Dataset:
             freq_hz = float(match.group("freq")) * 1e6  # MHz -> Hz
             f_idx = int(match.group("f"))
 
+            # --- Notch Filter ---
+            if (1.2e9 <= freq_hz <= 1.33e9) or (2.3e9 <= freq_hz <= 2.36e9):
+                self._logger.debug("Skipping candidate in notch filter range: %s MHz", freq_hz)
+                continue
+
             # --- Load image, convert to grayscale, and crop borders ---
             try:
                 with Image.open(png) as im:
