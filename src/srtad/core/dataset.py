@@ -14,7 +14,9 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 from PIL import Image
 import csv
-
+from sklearn.preprocessing import SplineTransformer
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
 from .candidate import Candidate
 
 try:
@@ -159,6 +161,58 @@ class Dataset:
             int(w * (1 - 0.149)),   # right margin
             int(h * (1 - 0.067)),   # bottom margin
         )
+    
+    def _preprocess_spectrogram(self, data: np.ndarray) -> np.ndarray:
+        """
+        Applies normalization and cleaning steps as per Pardo et al. (2025).
+        Using Scikit-Learn for B-spline interpolation.
+        
+        Steps:
+        1. Time-normalization: Divide flux by the mean over the observing window.
+        2. DC Spike removal: Replace center channel with neighbor average.
+        3. Bandpass correction: Divide by B-spline interpolation (via scikit-learn).
+        """
+        # Avoid division by zero
+        data = np.maximum(data, 1e-9)
+
+        # Time Normalization
+        time_means = np.mean(data, axis=1, keepdims=True)
+        data = data / time_means
+
+        # DC Spike Removal (Cleaning) 
+        # Assume the DC spike is at the center of the band (index W//2)
+        H, W = data.shape
+        dc_index = W // 2
+        if 0 < dc_index < W - 1:
+            # Replace the central column with the average of the two adjacent ones
+            data[:, dc_index] = (data[:, dc_index - 1] + data[:, dc_index + 1]) / 2.0
+
+        #Bandpass Correction (B-spline via Scikit-Learn) 
+        # Compute the mean profile (integrated bandpass)
+        bandpass = np.mean(data, axis=0)
+        
+        # Prepare data for sklearn (requires shape [n_samples, n_features])
+        X = np.arange(len(bandpass)).reshape(-1, 1)
+        y = bandpass
+
+        try:
+            # Create a pipeline: B-spline transformation -> Ridge Regression
+            # n_knots controls "smoothness". A low value (e.g., 10-20) avoids overfitting to peaks.
+            model = make_pipeline(
+                SplineTransformer(n_knots=20, degree=3, include_bias=False),
+                Ridge(alpha=1.0)
+            )
+            model.fit(X, y)
+            smooth_bandpass = model.predict(X)
+
+            # Divide each row by the spline profile
+            # reshape(1, -1) allows broadcasting over (Time, Freq)
+            data = data / smooth_bandpass.reshape(1, -1)
+
+        except Exception as e:
+            self._logger.warning(f"Scikit-learn B-spline fitting failed: {e}")
+
+        return data
 
     def load(self) -> List[Candidate]:
         """
@@ -199,6 +253,7 @@ class Dataset:
                     w, h = im.size
                     cropped = im.crop(self._crop_box(w, h))
                     arr = np.asarray(cropped, dtype=np.float64)
+                    arr = self._preprocess_spectrogram(arr)
             except Exception as exc:
                 self._logger.error("Failed to load or process image %s: %s", png, exc)
                 continue
