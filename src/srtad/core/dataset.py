@@ -162,6 +162,10 @@ class Dataset:
             int(h * (1 - 0.067)),   # bottom margin
         )
     
+    # ------------------------------------------------------------------ #
+    # Candidates preprocessing 
+    # ------------------------------------------------------------------ #
+    
     def _preprocess_spectrogram(self, data: np.ndarray) -> np.ndarray:
         """
         Applies normalization and cleaning steps as per Pardo et al. (2025).
@@ -213,6 +217,10 @@ class Dataset:
             self._logger.warning(f"Scikit-learn B-spline fitting failed: {e}")
 
         return data
+    
+    # ------------------------------------------------------------------ #
+    # Candidates loader
+    # ------------------------------------------------------------------ #
 
     def load(self) -> List[Candidate]:
         """
