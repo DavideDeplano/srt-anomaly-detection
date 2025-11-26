@@ -23,7 +23,7 @@ simulation:
   noise_type: "chi2"
 
   # Signal parameter ranges
-  amplitude_factor: [0.0, 4.0]
+  amplitude_factor: [0.0, 20.0] # 4x max noise
   drift_rate_hz_s: [-4.0, 4.0]
   width_hz: [20.0, 80.0]
 
@@ -33,11 +33,7 @@ simulation:
 
 # Pipeline configuration
 pipeline:
-  top_k: 100                     # Number of top candidates to export
-  score_weights:                 # Relative weights for each filter
-    cross_correlation: 0.5
-    frequency: 0.3
-    similarity: 0.2
+  top_k: 1000                    # Number of top candidates to export
 
 # Filters configuration
 filters:
@@ -58,7 +54,7 @@ filters:
 
     # Category configuration
     threshold: 0.0618             # Threshold for only-on class detection
-    only_on_category: 0           # Pattern ID used as "clean" class
+    only_on_category: 21          # Pattern ID used for ON-OFF-ON-OFF-ON-OFF
 
     # Path
     umap_model_path: "models/umap_density.pkl"
