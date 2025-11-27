@@ -112,11 +112,11 @@ class SimulationGenerator:
             ) if tqdm else range(n_panel_sets)
 
             for cadence_id in iterator:
+                start_f_idx = int(rng.integers(0, fchans))
                 batch_seed = self.seed + cadence_id
 
                 # panels generation
                 base_panels = []
-                base_freqs = []
 
                 for slot in range(panels_per_cadence):
                     np.random.seed(batch_seed * panels_per_cadence + slot)
@@ -131,9 +131,6 @@ class SimulationGenerator:
                     frame.add_noise(x_mean=noise_mean, noise_type=noise_type)
                     base_panels.append(frame)
 
-                    f_idx = int(rng.integers(0, fchans))
-                    base_freqs.append(f_idx)
-
                 # pattern (0..63) = ON/OFF combinations
                 for pattern_id in range(mask_combinations):
                     bits = [(pattern_id >> k) & 1 for k in range(panels_per_cadence)]
@@ -141,7 +138,7 @@ class SimulationGenerator:
 
                     for slot in range(panels_per_cadence):
                         frame = base_panels[slot].copy()
-                        f_idx = base_freqs[slot]
+                        f_idx = start_f_idx
 
                         f_start = frame.get_frequency(index=f_idx)
                         f_start_mhz = float(f_start)

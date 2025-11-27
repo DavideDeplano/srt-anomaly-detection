@@ -11,7 +11,7 @@ simulation:
   output_dir: "simulated/cadences"
 
   # Number of base panel sets (each expanded into mask_combinations cadences)
-  n_panel_sets: 20
+  n_panel_sets: 150
 
   # Frame parameters for synthetic panels
   fchans: 80
