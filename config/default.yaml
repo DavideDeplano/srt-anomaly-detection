@@ -8,24 +8,24 @@ paths:
   logs: logs                    # Log files
 
 simulation:
-  output_dir: "simulated/cadences"
+  output_cadences_dir: "simulated/cadences"
+  output_waterfall_plots_dir: "simulated/waterfall_plots"
 
   # Number of base panel sets (each expanded into mask_combinations cadences)
-  n_panel_sets: 150
+  n_panel_sets: 20000
 
   # Frame parameters for synthetic panels
   fchans: 80
   tchans: 16
-  df_hz: 2.75
-  dt_s: 18.75
-  fch1_mhz: 1420.0
-  noise_mean: 10
-  noise_type: "chi2"
+  df_hz: 2.7939677238464355
+  dt_s: 18.253611008
+  fch1_mhz: 6500.0
+  noise_mean: 10.0
 
   # Signal parameter ranges
-  amplitude_factor: [0.0, 20.0] # 4x max noise
+  amplitude_factor: [0.0, 4.0]
   drift_rate_hz_s: [-4.0, 4.0]
-  width_hz: [20.0, 80.0]
+  width_hz: [1.0, 20.0]
 
   # Cadence structure
   panels_per_cadence: 6          # 3 ON + 3 OFF
@@ -54,7 +54,8 @@ filters:
 
     # Category configuration
     threshold: 0.0618             # Threshold for only-on class detection
-    only_on_category: 21          # Pattern ID used for ON-OFF-ON-OFF-ON-OFF
+    only_on_category: 42          # Pattern ID used for ON-OFF-ON-OFF-ON-OFF
+    only_off_category: 21         # Pattern ID used for OFF-ON-OFF-ON-OFF-ON
 
     # Path
     umap_model_path: "models/umap_density.pkl"
@@ -67,15 +68,11 @@ filters:
     # Number of GMM components per band
     n_components_L: 200
     n_components_S: 200
-    n_components_C: 50
+    n_components_10cm: 50
 
     # Bagging settings
     n_bags: 10                    # Number of GMMs per band
     bag_size: 5000                # Size of each subsample
-
-    # Scoring options
-    invert_density: true          # Higher = more anomalous
-    rescale_0_1: true             # Normalize final score in [0,1]
 
     # Path
     gmm_model_path: "models/gmm_frequency.joblib"
