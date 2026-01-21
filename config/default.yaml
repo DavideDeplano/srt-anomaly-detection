@@ -2,10 +2,11 @@ random_seed: 42
 
 # Project paths
 paths:
-  data: data                    # Raw and preprocessed datasets
-  models: models                # Stored models (UMAP, KDE, GMM, etc.)
-  results: results              # Output files, rankings, figures
-  logs: logs                    # Log files
+  data: data                            # Raw and preprocessed datasets
+  models: models                        # Stored models (UMAP, KDE, GMM, etc.)
+  results: results                      # Output files, rankings, figures
+  logs: logs                            # Log files
+  real_png_dir: "/content/hdd_esterno"  # Directory with real candidate PNGs
 
 simulation:
   output_cadences_dir: "simulated/cadences"
@@ -37,10 +38,7 @@ pipeline:
 
 # Filters configuration
 filters:
-
-  # -------------------------------------------------------------
   # Density filter (UMAP + KDE on 15-D CC features)
-  # -------------------------------------------------------------
   density:
     # UMAP hyperparameters
     n_neighbors: 25
@@ -61,9 +59,7 @@ filters:
     umap_model_path: "models/umap_density.pkl"
     kde_models_dir: "models/kde_density/"
 
-  # -------------------------------------------------------------
   # Frequency filter (GMM bagging on per-band frequencies)
-  # -------------------------------------------------------------
   frequency:
     # Number of GMM components per band
     n_components_L: 200
@@ -77,9 +73,7 @@ filters:
     # Path
     gmm_model_path: "models/gmm_frequency.joblib"
 
-  # -------------------------------------------------------------
   # Similarity filter (UMAP on downsampled panels)
-  # -------------------------------------------------------------
   similarity:
     # UMAP hyperparameters
     n_neighbors: 25
