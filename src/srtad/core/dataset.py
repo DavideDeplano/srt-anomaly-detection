@@ -25,6 +25,7 @@ try:
 except ImportError:
     tqdm = None
 
+
 class Dataset:
     """
     Dataset wrapper.
@@ -51,11 +52,14 @@ class Dataset:
         self._use_tqdm = bool(use_tqdm)
 
         # Regex used to parse drift rate and frequency from the PNG filename
-        # Expected pattern: "..._dr_<float>_freq_<float>.png"
         self._rx = re.compile(
-            r'^.*_dr_(?P<dr>[-+0-9.eE]+)_freq_(?P<freq>[-+0-9.eE]+)\.png$',
-            re.IGNORECASE
-        )
+          r"^.*(?:"
+          r"_dr_(?P<dr1>[-+0-9.eE]+)_freq_(?P<freq1>[-+0-9.eE]+)"
+          r"|"
+          r"_(?P<freq2>[-+0-9.]+)MHz.*"
+          r")\.png$",
+          re.IGNORECASE
+        ) 
 
 
     def load_simulated_cadences(
@@ -102,9 +106,9 @@ class Dataset:
         with open(log_path, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                cadence_base = row["cadence_id"]              
-                pattern_id = int(row["pattern_id"])           
-                cid = f"{cadence_base}_pattern{pattern_id:02d}"  
+                cadence_base = row["cadence_id"]
+                pattern_id = int(row["pattern_id"])
+                cid = f"{cadence_base}_pattern{pattern_id:02d}"
 
                 if cid not in metadata_index:
                     metadata_index[cid] = {
@@ -154,26 +158,34 @@ class Dataset:
                 panel = raw_tensor[i, :, :]
                 clean_panel = self._preprocess_spectrogram(panel)
                 preprocessed_panels.append(clean_panel)
-            
+
             clean_tensor = np.stack(preprocessed_panels, axis=0)
             cadences.append((cadence_id, clean_tensor, meta))
 
         self._logger.info("Loaded %d synthetic cadences from %s", len(cadences), cadences_dir)
         return cadences
 
-    def _crop_box(self, w: int, h: int) -> tuple[int, int, int, int]:
+    def _crop_box(self, w: int, h: int, match: re.Match) -> tuple[int, int, int, int]:
         """
         Compute the crop rectangle as fixed fractions of image width/height.
 
         This removes fixed margins from the PNG image before further processing.
         """
-        return (
-            int(w * 0.0894),        # left margin
-            int(h * 0.044),         # top margin
-            int(w * (1 - 0.149)),   # right margin
-            int(h * (1 - 0.067)),   # bottom margin
-        )
-    
+        if match.group("freq1") is not None:
+            return (
+                int(w * 0.0894),        # left margin
+                int(h * 0.044),         # top margin
+                int(w * (1 - 0.149)),   # right margin
+                int(h * (1 - 0.067)),   # bottom margin
+            )
+        else:
+            return (
+                int(w * 0.0461),        # left margin
+                int(h * 0.1163),        # top margin
+                int(w * (1 - 0.086)),   # right margin
+                int(h * (1 - 0.04))     # bottom margin
+            )
+
     def _preprocess_spectrogram(self, data: np.ndarray) -> np.ndarray:
         """
         Apply normalization/cleaning steps to a 2D spectrogram array.
@@ -195,7 +207,7 @@ class Dataset:
         data = np.maximum(data, 1e-9)
 
         # 1) Time normalization: normalize each row by its frequency-mean
-        time_means = np.mean(data, axis=1, keepdims=True)          
+        time_means = np.mean(data, axis=1, keepdims=True)
         data = data / np.maximum(time_means, 1e-9)
 
         # 2) DC spike removal: replace center channel with neighbor average
@@ -205,7 +217,7 @@ class Dataset:
             data[:, dc_index] = (data[:, dc_index - 1] + data[:, dc_index + 1]) / 2.0
 
         # 3) Bandpass correction using a spline + ridge regression model
-        bandpass = np.mean(data, axis=0)                           
+        bandpass = np.mean(data, axis=0)
 
         X = np.arange(W, dtype=np.float64).reshape(-1, 1)
         y = bandpass.astype(np.float64)
@@ -262,8 +274,12 @@ class Dataset:
                 continue
 
             # Parse drift and frequency values from the filename
-            drift_hz_s = float(match.group("dr"))
-            freq_hz = float(match.group("freq")) * 1e6  # MHz -> Hz
+            if match.group("freq1") is not None:
+                drift_hz_s = float(match.group("dr1"))
+                freq_hz = float(match.group("freq1")) * 1e6
+            else:
+                freq_hz = float(match.group("freq2")) * 1e6
+                drift_hz_s = 0.0
 
             # Skip candidates falling into hard-coded notch frequency ranges
             if (1.2e9 <= freq_hz <= 1.33e9) or (2.3e9 <= freq_hz <= 2.36e9):
@@ -277,9 +293,8 @@ class Dataset:
                 with Image.open(png) as im:
                     im = im.convert("L")  # grayscale: (H, W)
                     w, h = im.size
-                    cropped = im.crop(self._crop_box(w, h))
+                    cropped = im.crop(self._crop_box(w, h, match))
                     arr = np.asarray(cropped, dtype=np.float64)
-                    arr = self._preprocess_spectrogram(arr)
             except Exception as exc:
                 self._logger.error("Failed to load or process image %s: %s", png, exc)
                 continue
@@ -296,6 +311,12 @@ class Dataset:
                 continue
 
             panels = [arr[i * step:(i + 1) * step, :] for i in range(6)]
+
+            try:
+                panels = [self._preprocess_spectrogram(p) for p in panels]
+            except Exception as exc:
+                self._logger.error("Preprocess failed for %s: %s", png, exc)
+                continue
 
             # Fixed output size for each panel
             TARGET_H = 16
@@ -337,7 +358,5 @@ class Dataset:
             )
             candidates.append(candidate)
 
-        self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), self._png_dir)
+        self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), search_dir)
         return candidates
-
-   
