@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from typing import List, Tuple
+import csv
 from src.srtad.simulation.generator import SimulationGenerator
 from src.srtad.core.dataset import Dataset
 from src.srtad.ml.filters.density import DensityFilter
@@ -10,6 +11,11 @@ from scripts.category import create_category_report
 from joblib import Parallel, delayed
 from src.srtad.ml.filters.frequency import FrequencyFilter
 from src.srtad.ml.filters.similarity import SimilarityFilter
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 # Per-process cache to avoid re-instantiating filters for every candidate
 _FREQ = None
@@ -58,26 +64,47 @@ def run_density_filter() -> List[Candidate]:
       (both passed and rejected) to allow manual inspection.
     """
     real_dir = Path(paths["real_png_dir"])
-    ds = Dataset()
+    ds = Dataset(png_dir=real_dir, use_tqdm=True)
     passed_candidates : List[Candidate] = []
     density = DensityFilter()
     threshold = filters["density"]["threshold"]
 
-    candidates = ds.load(real_dir)
+    candidates = ds.load()
 
     try:
-        for candidate in candidates:
-            score = density.calculate(candidate)
-            candidate.set_density_score(score)
+      it = candidates
+      if tqdm is not None:
+          it = tqdm(candidates, desc="Density scoring", unit="candidate")
 
-            if(candidate.density_score >= threshold):
-                passed_candidates.append(candidate)
-    
+      for candidate in it:
+          score = density.calculate(candidate)
+          candidate.set_density_score(score)
+
+          if candidate.density_score >= threshold:
+              passed_candidates.append(candidate)
+
     except RuntimeError as e:
         print(f"[ERROR] {e}")
         print("You must train the Density model first (option 2).")
+        return []
 
     print(f"Filtered {len(passed_candidates)} candidates on {len(candidates)}")
+
+    out_csv = Path(paths["results"]) / "passed_density.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "density_score", "frequency_mhz", "source_path"])
+        for c in passed_candidates:
+            writer.writerow([
+                c.id,
+                f"{c.density_score:.6e}",
+                f"{c.frequency_hz / 1e6:.6f}",
+                str(c.source_path),
+            ])
+
+    print(f"[OK] CSV written: {out_csv}")
 
     print("Generating category PDF for ALL candidates.")
     # The category report is generated on the full set to allow manual inspection 
