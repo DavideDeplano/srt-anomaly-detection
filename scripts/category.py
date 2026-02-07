@@ -1,84 +1,170 @@
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-import numpy as np
-import math
 from pathlib import Path
+from matplotlib.backends.backend_pdf import PdfPages
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+import math
 
-def create_category_report(candidates, output_filename="results/REPORT_CATEGORIES.pdf"):
+from src.srtad.core.dataset import Dataset
+
+def create_category_report(
+    candidates,
+    output_filename="results/REPORT_CATEGORIES.pdf",
+    threshold=None,
+    rows=2,
+    cols=2,
+    dpi=300,
+    show_all_6_panels=True,
+):
     """
-    Generate a PDF report grouping candidates by assigned category.
+    Generate a PDF report of candidates grouped by category.
 
-    The function reads `candidate.category` and visualizes one panel per candidate,
-    arranged in a fixed grid layout, to allow quick visual inspection of categories.
+    For each candidate, the function:
+    - loads the original waterfall PNG from `source_path`;
+    - applies a fixed crop to isolate the spectrogram region;
+    - preprocesses the image using `Dataset._preprocess_spectrogram`;
+    - reconstructs the cadence layout (six panels or a single panel);
+    - normalizes contrast and renders the result into a grid layout.
+
+    The report is saved as a multi-page PDF at `output_filename`.
     """
     path = Path(output_filename)
     path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"\n--- PDF Report Generation: {path} ---")
 
-    # 1) Keep only candidates that have been assigned a category
-    valid_candidates = [c for c in candidates if c.category is not None]
-    
-    if not valid_candidates:
-        print("WARNING: No candidates have an assigned category.")
+    ds = Dataset()
+
+    def _passed(c):
+        """
+        Decide whether a candidate passes the density criterion.
+
+        Priority:
+        - If `c.passed_density` exists and is not None, return it as boolean.
+        - Otherwise fall back to `c.density_score`:
+            * if `threshold` is provided: pass if score >= threshold
+            * else: pass if score > 0.0
+        """
+        if hasattr(c, "passed_density") and c.passed_density is not None:
+            return bool(c.passed_density)
+        s = getattr(c, "density_score", None)
+        if s is None:
+            return False
+        return s >= threshold if threshold is not None else s > 0.0
+
+    def _crop_box_local(w: int, h: int):
+        """
+        Compute a crop rectangle using fixed fractional margins.
+
+        The returned tuple is (left, top, right, bottom) in pixel coordinates.
+        """
+        return (
+            int(w * 0.0894),        # left
+            int(h * 0.0440),        # top
+            int(w * (1 - 0.1490)),  # right
+            int(h * (1 - 0.0670)),  # bottom
+        )
+
+    # Filter candidates: passed + categorized + source_path available
+    valid = [
+        c for c in candidates
+        if _passed(c)
+        and getattr(c, "category", None) is not None
+        and getattr(c, "source_path", None) is not None
+    ]
+
+    if not valid:
+        print("WARNING: no valid candidates.")
         return
 
-     # 2) Sort by category, then by descending density score
-    #    This groups categories together and shows strongest candidates first
-    valid_candidates.sort(key=lambda x: (x.category, -(x.density_score or 0)))
+    # Sort by category, then by descending density_score
+    valid.sort(key=lambda x: (x.category, -(x.density_score or 0.0)))
 
-    print(f"Generating layout for {len(valid_candidates)} classified candidates...")
-
-    # Grid configuration: 25 images per page (5 rows x 5 columns)
-    ROWS, COLS = 5, 5
-    items_per_page = ROWS * COLS
-    num_pages = math.ceil(len(valid_candidates) / items_per_page)
+    per_page = rows * cols
+    num_pages = math.ceil(len(valid) / per_page)
 
     with PdfPages(path) as pdf:
         for i in range(num_pages):
-            # Select candidates for the current page
-            batch = valid_candidates[i*items_per_page : (i+1)*items_per_page]
-            
-            # Create page figure
-            fig, axes = plt.subplots(ROWS, COLS, figsize=(20, 24))
-            axes = axes.flatten()
-            
-            # Page header with category range
-            cat_start = batch[0].category
-            cat_end = batch[-1].category
-            fig.suptitle(f"Category Report - Page {i+1}/{num_pages} (Cat {cat_start} -> {cat_end})", fontsize=20)
-            
+            batch = valid[i * per_page:(i + 1) * per_page]
+
+            # Create page grid
+            fig, axes = plt.subplots(rows, cols, figsize=(26, 16))
+            axes = np.array(axes).flatten()
+
+            fig.suptitle(
+                f"Category Report - Page {i+1}/{num_pages} "
+                f"(Cat {batch[0].category} -> {batch[-1].category})",
+                fontsize=22
+            )
+
+            last_idx = -1
+
             for idx, cand in enumerate(batch):
+                last_idx = idx
                 ax = axes[idx]
-                
-                # Extract first panel of the cadence for visualization
-                raw = cand.cadence
-                if raw.ndim == 3: 
-                    img = raw[0, :, :] # First panel
-                else: 
-                    img = raw
-                
-                # Contrast normalization using percentiles
+
+                # Load and crop the original PNG for this candidate
+                try:
+                    sp = cand.source_path
+                    if isinstance(sp, (list, tuple)):
+                        sp = sp[0]
+                    sp = Path(str(sp))
+
+                    if not sp.exists():
+                        raise FileNotFoundError(sp)
+
+                    with Image.open(sp) as im:
+                        im = im.convert("L")
+                        w, h = im.size
+                        cropped = im.crop(_crop_box_local(w, h))
+                        arr = np.asarray(cropped, dtype=np.float64)
+
+                except Exception as e:
+                    ax.set_title(
+                        f"FAILED TO READ\n{str(getattr(cand,'source_path','NO_PATH'))}\n"
+                        f"{type(e).__name__}: {e}",
+                        fontsize=9,
+                        weight="bold"
+                    )
+                    ax.axis("off")
+                    continue
+
+                # Preprocess (same routine used by the Dataset loader)
+                arr = ds._preprocess_spectrogram(arr)
+
+                # Split into 6 vertical panels and optionally stack them
+                H = arr.shape[0]
+                step = H // 6
+                if step <= 0:
+                    img = arr
+                else:
+                    panels = [arr[k * step:(k + 1) * step, :] for k in range(6)]
+                    img = np.vstack(panels) if show_all_6_panels else panels[0]
+
+                # Contrast normalization for readability
                 vmin, vmax = np.nanpercentile(img, 1), np.nanpercentile(img, 99)
-                img_norm = np.clip((img - vmin) / (vmax - vmin + 1e-9), 0, 1)
-                
-                ax.imshow(img_norm, aspect='auto', cmap='viridis')
-                
-                # Labels and metadata
-                cat = cand.category
-                score = cand.density_score if cand.density_score is not None else 0.0
-                
-                name = Path(cand.source_path).name[-15:] # Last 15 chars of filename
-                
-                ax.set_title(f"CAT: {cat}\nScore: {score:.1e}\n{name}", 
-                             fontsize=9, weight='bold', backgroundcolor='#f0f0f0')
-                ax.axis('off')
-            
-            # Disable unused grid cells on the last page
-            for j in range(idx + 1, len(axes)):
-                axes[j].axis('off')
-                
-            pdf.savefig(fig)
+                img = np.clip((img - vmin) / (vmax - vmin + 1e-9), 0, 1)
+
+                # Render
+                ax.imshow(img, aspect="auto", cmap="viridis", interpolation="nearest")
+
+                name = sp.name
+                score = cand.density_score or 0.0
+
+                ax.set_title(
+                    f"CAT: {cand.category} | Score: {score:.3e}\n{name}",
+                    fontsize=9,
+                    weight="bold",
+                    backgroundcolor="#f0f0f0"
+                )
+                ax.axis("off")
+
+            # Disable unused axes on the last page
+            for j in range(last_idx + 1, len(axes)):
+                axes[j].axis("off")
+
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+            pdf.savefig(fig, dpi=dpi)
             plt.close(fig)
-            
-    print("Report generated successfully!")
+
+    print("Report generated successfully.")

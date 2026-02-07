@@ -1,7 +1,5 @@
-# src/srtad/utils/logger.py
-
-import logging
 from pathlib import Path
+import logging
 
 def setup_logger(name: str = "srtad", level: str = "INFO", file: str | None = None):
     """

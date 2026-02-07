@@ -1,15 +1,14 @@
 from typing import Iterable, List, Dict
+from pathlib import Path
+from sklearn.mixture import GaussianMixture
 import logging
 import math
-from pathlib import Path
-
 import numpy as np
-from sklearn.mixture import GaussianMixture
 import joblib
 
-from .i_filter import IFilter
-from ...core.candidate import Candidate
-from ...config import filters
+from src.srtad.ml.filters.i_filter import IFilter
+from src.srtad.core.candidate import Candidate
+from src.srtad.config import filters
 
 try:
     from tqdm.auto import tqdm
@@ -23,7 +22,7 @@ class FrequencyFilter(IFilter):
     Purpose
     -------
     Estimate how "rare" a candidate frequency is within its observing band
-    (L, S, 10cm) by learning a probabilistic density model from training data
+    (C, K) by learning a probabilistic density model from training data
 
     Model
     -----
@@ -73,9 +72,8 @@ class FrequencyFilter(IFilter):
 
         # Default number of components for each band GMM
         self._components: Dict[str, int] = {
-            "L": int(frequency_cfg["n_components_L"]),
-            "S": int(frequency_cfg["n_components_S"]),
-            "10cm": int(frequency_cfg["n_components_10cm"]),
+            "C": int(frequency_cfg["n_components_C"]),
+            "K": int(frequency_cfg["n_components_K"])
         }
 
         # Bagging parameters
@@ -84,9 +82,8 @@ class FrequencyFilter(IFilter):
 
         # Ensembles: band -> list of fitted GaussianMixture models
         self._gmm_ensembles: Dict[str, List[GaussianMixture]] = {
-            "L": [],
-            "S": [],
-            "10cm": [],
+            "C": [],
+            "K": []
         }
 
         # Global min/max used to scale raw scores into [0, 1]
@@ -94,34 +91,25 @@ class FrequencyFilter(IFilter):
         self._raw_max: float = 0.0
 
     @staticmethod
-    def _extract_band(candidate: Candidate) -> str | None:
+    def _extract_band(candidate: Candidate) -> str:
         """
         Assign a band label based on the candidate central frequency
 
-        Band definitions are intentionally overlapping
+        Band (SRT receivers)
         ---------------------------------------------
-        - L band:    1.10-1.90 GHz
-        - S band:    1.80-2.80 GHz
-        - 10cm band: 2.60-3.45 GHz
-
-        Overlap resolution policy
-        -------------------------
-        Because this function uses an if/elif chain, overlaps are resolved by a
-        deterministic first-match-wins rule:
-        - 1.80-1.90 GHz is assigned to L (L checked before S)
-        - 2.60-2.80 GHz is assigned to S (S checked before 10cm)
+        - C band:    5.7-7.7 GHz
+        - K band:    18-26.5 GHz
         """
         f = candidate.frequency_hz
 
-        if 1.10e9 <= f <= 1.90e9:
-            return "L"
-        elif 1.80e9 <= f <= 2.80e9:
-            return "S"
-        elif 2.60e9 <= f <= 3.45e9:
-            return "10cm"
-        else:
-            # Frequency outside the supported band ranges
-            return None
+        if 5.7e9 <= f <= 7.7e9:
+          return "C"
+      
+        if 18.0e9 <= f <= 26.5e9:
+          return "K"
+
+        # Frequency outside the supported band ranges
+        return "OUT_OF_BAND"
 
     def fit(self, candidates: Iterable[Candidate]) -> None:
         """
@@ -137,12 +125,14 @@ class FrequencyFilter(IFilter):
         self._logger.info(
             "[FREQUENCY FILTER] Training mode: fitting GMM ensembles over frequencies..."
         )
+        
+        candidates = list(candidates)
 
         # Group candidates by band label
-        band_to_candidates: Dict[str, List[Candidate]] = {"L": [], "S": [], "10cm": []}
+        band_to_candidates: Dict[str, List[Candidate]] = {"C": [], "K": []}
         for c in candidates:
             b = self._extract_band(c)
-            if b is not None:
+            if b in band_to_candidates:
                 band_to_candidates[b].append(c)
 
         # Reproducible RNG for bag sampling
@@ -351,7 +341,7 @@ class FrequencyFilter(IFilter):
 
         # Map frequency to band
         band = self._extract_band(candidate)
-        if band is None:
+        if band not in self._gmm_ensembles:
             # Out-of-band frequencies are not scored
             return 0.0
 

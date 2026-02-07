@@ -10,9 +10,10 @@ This script:
 """
 
 from pathlib import Path
+from blimpy import Waterfall
 import sys
 import numpy as np
-from blimpy import Waterfall
+
 from srtad.config import paths, simulation, random_seed
 from srtad.core.dataset import Dataset
 

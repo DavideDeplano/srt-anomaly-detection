@@ -1,16 +1,18 @@
-import sys
 from pathlib import Path
 from typing import List, Tuple
+from joblib import Parallel, delayed
+import sys
 import csv
+
 from src.srtad.simulation.generator import SimulationGenerator
 from src.srtad.core.dataset import Dataset
 from src.srtad.ml.filters.density import DensityFilter
 from src.srtad.config import paths, simulation as sim_cfg, filters
 from src.srtad.core.candidate import Candidate
 from scripts.category import create_category_report
-from joblib import Parallel, delayed
 from src.srtad.ml.filters.frequency import FrequencyFilter
 from src.srtad.ml.filters.similarity import SimilarityFilter
+from src.srtad.management.ranker import Ranker
 
 try:
     from tqdm.auto import tqdm
@@ -28,7 +30,7 @@ def run_fit_density() -> None:
     This step is executed once and persists the trained density model to disk.
     The resulting model is later used during inference on real candidates.
     """
-    ds = Dataset()
+    ds = Dataset(use_tqdm=True)
 
     base_data_dir = Path(paths["data"])
     cadences_dir = base_data_dir / sim_cfg["output_cadences_dir"]
@@ -162,6 +164,11 @@ def run_frequency_similarity_filters(candidates: List[Candidate]) -> None:
     freq.fit(candidates)
     sim.fit(candidates)
 
+    for c in candidates:
+        b = FrequencyFilter._extract_band(c)
+        if b is not None:
+            c.set_band(b)
+
     results = Parallel(n_jobs=-1, prefer="processes")(
         delayed(_score_one)(i, c) for i, c in enumerate(candidates)
     )
@@ -171,6 +178,67 @@ def run_frequency_similarity_filters(candidates: List[Candidate]) -> None:
         candidates[idx].set_similarity_score(s_score)
 
     print(f"Computed frequency+similarity scores for {len(candidates)} candidates.")
+
+def run_ranking(candidates: List[Candidate]) -> None:
+    """
+    Run paper-style ranking samples on candidates already scored by
+    FrequencyFilter and SimilarityFilter.
+
+    Requirements:
+    - candidate.frequency_score and candidate.similarity_score must be set
+    - candidate.band must be set (e.g. by FrequencyFilter.calculate)
+    - candidate.target must be set (e.g. Dataset.load -> candidate.set_target("UNKNOWN"))
+    """
+    if not candidates:
+        print("No candidates available for ranking. Run filters first.")
+        return
+
+    # Exclude bands not modeled 
+    candidates = [c for c in candidates if c.band != "OUT_OF_BAND"]
+
+    r = Ranker()
+    samples = r.build_samples(candidates)
+
+    # Print summary
+    print("\n=== Ranking samples ===")
+    for name, group in samples.items():
+        print(f"{name}: {len(group)}")
+
+    # Write CSVs under results/ (no extra Ranker methods needed)
+    out_dir = Path(paths["results"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_csv(name: str, group: List[Candidate]) -> None:
+        out_csv = out_dir / f"{name}.csv"
+        with out_csv.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "id",
+                "target",
+                "band",
+                "density_score",
+                "frequency_score",
+                "similarity_score",
+                "frequency_mhz",
+                "drift_hz_s",
+                "source_path",
+            ])
+            for c in group:
+                w.writerow([
+                    c.id,
+                    getattr(c, "target", ""),
+                    getattr(c, "band", ""),
+                    "" if c.density_score is None else f"{float(c.density_score):.6e}",
+                    "" if c.frequency_score is None else f"{float(c.frequency_score):.6f}",
+                    "" if c.similarity_score is None else f"{float(c.similarity_score):.6f}",
+                    f"{float(c.frequency_hz) / 1e6:.6f}",
+                    f"{float(c.drift_hz_s):.6f}",
+                    str(c.source_path),
+                ])
+        print(f"[OK] CSV written: {out_csv}")
+
+    for name, group in samples.items():
+        _write_csv(name, group)
 
 def main() -> None:
     """
@@ -191,6 +259,7 @@ def main() -> None:
         print("2) Train Density Model (simulated data)")
         print("3) Run Density Filter")
         print("4) Run Frequency + Similarity Filters")
+        print("5) Run Ranking")
         print("0) Exit")
 
         choice = input("Select: ").strip()
@@ -203,6 +272,8 @@ def main() -> None:
             passed_candidates = run_density_filter()
         elif choice == "4":
             run_frequency_similarity_filters(passed_candidates)
+        elif choice == "5":
+            run_ranking(passed_candidates)
         elif choice == "0":
           sys.exit(0)
         else:

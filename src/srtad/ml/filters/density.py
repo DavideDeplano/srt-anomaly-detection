@@ -1,25 +1,23 @@
 from typing import Iterable, Dict, Any, Tuple
 from pathlib import Path
-import logging
-import math
-
-import joblib
-import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KernelDensity
 from umap import UMAP
+import logging
+import math
+import joblib
+import numpy as np
 
-from .i_filter import IFilter
-from ...core.candidate import Candidate
-from ...management.cross_correlation_extractor import CrossCorrelationExtractor
-from ...config import filters, simulation
-from ...management.visualizer import Visualizer
+from src.srtad.ml.filters.i_filter import IFilter
+from src.srtad.core.candidate import Candidate
+from src.srtad.management.cross_correlation_extractor import CrossCorrelationExtractor
+from src.srtad.config import filters, simulation
+from src.srtad.management.visualizer import Visualizer
 
 try:
     from tqdm.auto import tqdm
 except ImportError:
     tqdm = None
-
 
 class DensityFilter(IFilter):
     """

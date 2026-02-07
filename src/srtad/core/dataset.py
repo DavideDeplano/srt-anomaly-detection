@@ -8,17 +8,18 @@ Handles:
 """
 
 from pathlib import Path
-import re
-import logging
 from typing import List, Dict, Any, Tuple
-import numpy as np
 from PIL import Image
-import csv
 from sklearn.preprocessing import SplineTransformer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
-from .candidate import Candidate
 from skimage.transform import resize
+import re
+import logging
+import numpy as np
+import csv
+
+from src.srtad.core.candidate import Candidate
 
 try:
     from tqdm.auto import tqdm
@@ -354,8 +355,9 @@ class Dataset:
                 frequency_hz=freq_hz,
                 drift_hz_s=drift_hz_s,
                 cadence=cadence,
-                source_path=png,
+                source_path=png
             )
+            candidate.set_target("UNKNOWN")  # To change when targets are aviable
             candidates.append(candidate)
 
         self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), search_dir)

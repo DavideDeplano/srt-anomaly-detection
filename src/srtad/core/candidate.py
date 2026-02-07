@@ -57,6 +57,13 @@ class Candidate:
         # Similarity score quantifying ON/OFF consistency in embedded space
         self._similarity_score: float | None = None
 
+        # Source target identifier used for stratification in ranking
+        # NOTE: not aviable in the current dataset
+        self._target: str | None = None
+
+        # Band information extracted from the candidate's frequency, used for band-specific ranking
+        self._band: str | None = None
+
     @property
     def id(self) -> str:
         """Unique identifier for this candidate."""
@@ -130,6 +137,24 @@ class Candidate:
         """Set the ON/OFF similarity score."""
         self._similarity_score = float(value)
 
+    @property
+    def target(self) -> str | None:
+        """Source target identifier used for stratification in ranking."""
+        return self._target
+    
+    def set_target(self, value: str) -> None:
+        """Set the source target identifier used for stratification in ranking."""
+        self._target = str(value)
+
+    @property
+    def band(self) -> str | None:
+        """Band information extracted from the candidate's frequency."""
+        return self._band
+    
+    def set_band(self, value: str) -> None:
+        """Set the band information extracted from the candidate's frequency."""
+        self._band = str(value)
+
     def to_summary(self) -> Dict[str, Any]:
         """Return a lightweight summary with metadata and computed scores."""
         return {
@@ -139,5 +164,7 @@ class Candidate:
             "density_score": self.density_score,
             "frequency_score": self.frequency_score,
             "similarity_score": self.similarity_score,
+            "target": self.target,
+            "band": self.band,
             "source_path": str(self.source_path),
         }

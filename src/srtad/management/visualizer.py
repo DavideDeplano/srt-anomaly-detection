@@ -3,14 +3,13 @@ Visualization module.
 Handles result display, updates, and dashboard interactions.
 """
 
-import logging
 from pathlib import Path
 from sklearn.neighbors import KernelDensity
-
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
-from ..core.candidate import Candidate
-from ..config import paths
+
+from src.srtad.config import paths
 
 class Visualizer:
     """

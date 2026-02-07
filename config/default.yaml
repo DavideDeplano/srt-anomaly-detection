@@ -6,7 +6,8 @@ paths:
   models: models                        # Stored models (UMAP, KDE, GMM, etc.)
   results: results                      # Output files, rankings, figures
   logs: logs                            # Log files
-  real_png_dir: "/content/hdd_esterno"  # Directory with real candidate PNGs
+  real_png_dir: "/content/filippo/ML-SRT-SETI/results/inference"  # Directory with real candidate PNGs
+  #real_png_dir: "/content/hdd_esterno"
 
 simulation:
   output_cadences_dir: "simulated/cadences"
@@ -32,9 +33,12 @@ simulation:
   panels_per_cadence: 6          # 3 ON + 3 OFF
   mask_combinations: 64          # 2^6
 
-# Pipeline configuration
-pipeline:
+# Ranker configuration
+ranker:
   top_k: 1000                    # Number of top candidates to export
+  control_k: 3000
+  top_percentile_freq: 0.01
+  top_percentile_sim: 0.01
 
 # Filters configuration
 filters:
@@ -62,9 +66,8 @@ filters:
   # Frequency filter (GMM bagging on per-band frequencies)
   frequency:
     # Number of GMM components per band
-    n_components_L: 200
-    n_components_S: 200
-    n_components_10cm: 50
+    n_components_C: 100
+    n_components_K: 100
 
     # Bagging settings
     n_bags: 10                    # Number of GMMs per band

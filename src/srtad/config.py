@@ -1,5 +1,5 @@
-import yaml
 from pathlib import Path
+import yaml
 
 CONFIG_PATH = Path("config/default.yaml")
 
@@ -8,7 +8,7 @@ with open(CONFIG_PATH, "r") as f:
 
 random_seed = int(cfg["random_seed"])
 paths = cfg["paths"]
-pipeline = cfg["pipeline"]
+ranker = cfg["ranker"]
 simulation = cfg["simulation"]
 filters = cfg["filters"]
 logging_cfg = cfg["logging"]

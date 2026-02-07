@@ -18,15 +18,16 @@ A CSV log file is also produced to store slot-level metadata for traceability
 """
 
 from astropy import units as u
+from pathlib import Path
+from scipy.ndimage import zoom
 import setigen as stg
 import numpy as np
-from pathlib import Path
+import inspect
 import csv
 import matplotlib.pyplot as plt
-from ..config import simulation as sim_cfg, paths, random_seed
 import logging
-from scipy.ndimage import zoom
-import inspect
+
+from src.srtad.config import simulation as sim_cfg, paths, random_seed
 
 try:
     from tqdm.auto import tqdm

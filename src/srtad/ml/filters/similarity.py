@@ -1,15 +1,14 @@
 from typing import Iterable, List, Dict
 from pathlib import Path
+from umap import UMAP
 import logging
 import math
-
 import joblib
 import numpy as np
-from umap import UMAP
 
-from .i_filter import IFilter
-from ...core.candidate import Candidate
-from ...config import filters
+from src.srtad.ml.filters.i_filter import IFilter
+from src.srtad.core.candidate import Candidate
+from src.srtad.config import filters
 
 try:
     from tqdm.auto import tqdm
