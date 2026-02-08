@@ -44,8 +44,7 @@ class Candidate:
         # --- Outputs from pipeline filters ---
         # NOTE: "category" is a diagnostic helper, not a semantic label
         # It stores the argmax category assigned by the FIRST-stage density filter
-        # (UMAP + KDE over simulated categories). It is useful for reporting/debugging
-        # how candidates distribute across KDE categories, and to explain rejections
+        # (UMAP + KDE over simulated categories).
         self._category: int | None = None
 
         # Density score produced by the UMAP + KDE filter (first-stage filtering)
