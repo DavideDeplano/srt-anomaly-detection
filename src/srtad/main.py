@@ -13,6 +13,7 @@ from scripts.category import create_category_report
 from src.srtad.ml.filters.frequency import FrequencyFilter
 from src.srtad.ml.filters.similarity import SimilarityFilter
 from src.srtad.management.ranker import Ranker
+from src.srtad.management.visualizer import Visualizer
 
 try:
     from tqdm.auto import tqdm
@@ -52,7 +53,7 @@ def run_fit_density() -> None:
 
     print("Density model training completed and saved.\n")
 
-def run_density_filter() -> List[Candidate]:
+def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
     """
     Apply the DensityFilter to real candidates.
 
@@ -88,7 +89,7 @@ def run_density_filter() -> List[Candidate]:
     except RuntimeError as e:
         print(f"[ERROR] {e}")
         print("You must train the Density model first (option 2).")
-        return []
+        return [], []
 
     print(f"Filtered {len(passed_candidates)} candidates on {len(candidates)}")
 
@@ -113,7 +114,7 @@ def run_density_filter() -> List[Candidate]:
     # even when no candidate passes the density threshold
     create_category_report(candidates)
     
-    return passed_candidates
+    return passed_candidates, candidates
 
 def _get_filters() -> Tuple[FrequencyFilter, SimilarityFilter]:
     """
@@ -142,7 +143,10 @@ def _score_one(idx: int, c: Candidate) -> Tuple[int, float, float]:
     freq, sim = _get_filters()
     return idx, float(freq.calculate(c)), float(sim.calculate(c))
 
-def run_frequency_similarity_filters(candidates: List[Candidate]) -> None:
+def run_frequency_similarity_filters(
+    passed_candidates: List[Candidate],
+    all_candidates: List[Candidate],
+) -> None:
     """
     Fit and apply FrequencyFilter and SimilarityFilter on density-passed candidates.
 
@@ -155,29 +159,43 @@ def run_frequency_similarity_filters(candidates: List[Candidate]) -> None:
     - Training is executed once in the main process.
     - Scoring is parallelized across candidates.
     """
-    if not candidates:
+    if not passed_candidates:
         print("No candidates passed the density filter. Skipping.")
+        return
+    if not all_candidates:
+        print("No all_candidates available. Run density filter first (option 3).")
         return
 
     freq = FrequencyFilter()
     sim = SimilarityFilter()
-    freq.fit(candidates)
-    sim.fit(candidates)
 
-    for c in candidates:
+    freq.fit(passed_candidates)
+    sim.fit(passed_candidates)
+
+    for c in passed_candidates:
         b = FrequencyFilter._extract_band(c)
         if b is not None:
             c.set_band(b)
 
     results = Parallel(n_jobs=-1, prefer="processes")(
-        delayed(_score_one)(i, c) for i, c in enumerate(candidates)
+        delayed(_score_one)(i, c) for i, c in enumerate(passed_candidates)
     )
 
     for idx, f_score, s_score in results:
-        candidates[idx].set_frequency_score(f_score)
-        candidates[idx].set_similarity_score(s_score)
+        passed_candidates[idx].set_frequency_score(f_score)
+        passed_candidates[idx].set_similarity_score(s_score)
 
-    print(f"Computed frequency+similarity scores for {len(candidates)} candidates.")
+    viz = Visualizer()
+    viz.plot_frequency_histogram_by_band(all_candidates, filename="frequency_hist.png")
+    viz.plot_frequency_score_histogram_by_band(passed_candidates, filename="freqscore_hist.png")
+
+    sim.plot_umap_similarity(
+        background_candidates=all_candidates,
+        scored_candidates=passed_candidates,
+        filename="similarity_umap.png",
+    )
+
+    print(f"Computed frequency+similarity scores for {len(passed_candidates)} candidates.")
 
 def run_ranking(candidates: List[Candidate]) -> None:
     """
@@ -251,7 +269,8 @@ def main() -> None:
     4) Fit and apply frequency + similarity filters
     0) Exit
     """
-    passed_candidates: List[Candidate] = []
+    passed_candidates = []
+    all_candidates = []
 
     while True:
         print("\n=== SRT Anomaly Detection ===")
@@ -269,9 +288,9 @@ def main() -> None:
         elif choice == "2":
             run_fit_density()
         elif choice =="3":
-            passed_candidates = run_density_filter()
+            passed_candidates, all_candidates = run_density_filter()
         elif choice == "4":
-            run_frequency_similarity_filters(passed_candidates)
+            run_frequency_similarity_filters(passed_candidates, all_candidates)
         elif choice == "5":
             run_ranking(passed_candidates)
         elif choice == "0":

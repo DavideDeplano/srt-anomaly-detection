@@ -9,6 +9,7 @@ import numpy as np
 from src.srtad.ml.filters.i_filter import IFilter
 from src.srtad.core.candidate import Candidate
 from src.srtad.config import filters
+from src.srtad.management.visualizer import Visualizer  
 
 try:
     from tqdm.auto import tqdm
@@ -30,18 +31,18 @@ class SimilarityFilter(IFilter):
 
     Raw score
     ---------
-    The raw score is a ratio of mean distances:
-        ratio = mean_d(ON-OFF) / (mean_d(ON-ON) + eps)
+    The raw score is defined as:
+        raw = 1 - mean_d(ON-ON) / (mean_d(ON-OFF) + eps)
 
     Interpretation
     --------------
     - ON panels should be close to each other (small ON-ON distance)
     - ON panels should be far from OFF panels (large ON-OFF distance)
-    - Therefore, larger ratios indicate stronger ON/OFF separation and are scored higher
+    - Therefore, larger raw scores indicate stronger ON/OFF separation and are scored higher
 
     Normalization
     -------------
-    A global min/max range of raw ratios is computed on training candidates and used to
+    A global min/max range of raw scores is computed on training candidates and used to
     scale scores into [0, 1] during inference
     """
     name: str = "similarity"
@@ -199,7 +200,7 @@ class SimilarityFilter(IFilter):
 
     def _compute_scaling(self, candidates: Iterable[Candidate]) -> None:
         """
-        Compute global min/max of raw similarity ratios across training candidates
+        Compute global min/max of raw similarity scores across training candidates
         """
         raw_scores: List[float] = []
 
@@ -259,11 +260,11 @@ class SimilarityFilter(IFilter):
     
     def _raw_similarity_score(self, candidate: Candidate) -> float:
         """
-        Compute the raw similarity ratio for a single candidate
+        Compute the raw similarity score for a single candidate
 
         Definition
         ----------
-        ratio = mean_d(ON-OFF) / (mean_d(ON-ON) + eps)
+        raw = 1 - mean_d(ON-ON) / (mean_d(ON-OFF) + eps)
 
         Guards
         ------
@@ -279,7 +280,7 @@ class SimilarityFilter(IFilter):
 
         try:
             # Downsample cadence panels and flatten for UMAP transform
-            ds = self._downsample_cadence(cadence)          # (6, 16, 8)
+            ds = self._downsample_cadence(cadence)          # (6, 8, 16)
             panels_flat = ds.reshape(6, -1)                 # (6, 128)
 
             # Safety check: expected flattened panel dimensionality
@@ -337,12 +338,12 @@ class SimilarityFilter(IFilter):
 
         # Epsilon avoids division by zero when ON panels collapse into nearly identical points
         eps = 1e-6
-        ratio = mean_on_off / (mean_on_on + eps)
+        score_raw = 1.0 - (mean_on_on / (mean_on_off + eps))
 
-        if not math.isfinite(ratio):
+        if not math.isfinite(score_raw):
             return 0.0
 
-        return float(ratio)
+        return float(score_raw)
 
     def _downsample_cadence(self, cadence: np.ndarray) -> np.ndarray:
         """
@@ -478,3 +479,148 @@ class SimilarityFilter(IFilter):
         )
         self._on_indices = list(state.get("on_indices", self._on_indices))
         self._off_indices = list(state.get("off_indices", self._off_indices))
+
+    def plot_umap_similarity(
+        self,
+        background_candidates,
+        scored_candidates,
+        filename: str = "similarity_umap.png",
+        max_panels_background: int = 200000,
+    ) -> None:
+        """
+        Generate a paper-style UMAP visualization for the SimilarityFilter (Figure 7-like).
+
+        The plot shows:
+        1) A large background "cloud" (black points) made of UMAP embeddings of *individual panels*
+            sampled from ALL candidates (background_candidates).
+        2) Two example candidates overlaid as letters:
+            - "good" candidate: highest similarity_score (green letters)
+            - "bad"  candidate: lowest  similarity_score (red letters)
+        """
+        # Materialize iterables once (they may be generators).
+        bg = list(background_candidates)
+
+        # Keep only candidates that already have a similarity_score (computed in the pipeline).
+        scored = [
+            c for c in scored_candidates
+            if getattr(c, "similarity_score", None) is not None
+        ]
+
+        # Need:
+        # - at least 1 background candidate (for the cloud)
+        # - at least 2 scored candidates (to choose best/worst)
+        if len(scored) < 2 or not bg:
+            return
+
+        # Select extremes among scored candidates.
+        c_good = max(scored, key=lambda c: float(c.similarity_score))
+        c_bad = min(scored, key=lambda c: float(c.similarity_score))
+
+        def _embed_candidate_panels(c):
+            """
+            Embed the 6 panels of a single candidate into UMAP space.
+
+            Returns
+            -------
+            np.ndarray | None
+                (6, 2) array if successful, else None.
+            """
+            cad = getattr(c, "cadence", None)
+            if cad is None:
+                return None
+
+            cad = np.asarray(cad, dtype=float)
+            if cad.ndim != 3 or cad.shape[0] != 6:
+                return None
+
+            # Downsample (6, 16, 80) -> (6, 8, 16) using the filter's block-averaging method.
+            ds = self._downsample_cadence(cad)  # (6, 8, 16)
+
+            # Flatten each panel: (6, 8, 16) -> (6, 128)
+            X6 = ds.reshape(6, -1)
+
+            # Project into UMAP: (6, 128) -> (6, 2)
+            return self._umap.transform(X6)
+
+        def _embed_background_panels(cands, cap: int):
+            """
+            Build the background cloud by embedding panels from many candidates.
+
+            Strategy
+            --------
+            Iterate through candidates and accumulate flattened panel vectors until
+            `cap` total panels are collected. Then embed all of them in one UMAP transform.
+
+            Returns
+            -------
+            np.ndarray | None
+                (N, 2) UMAP coordinates for the background panels, or None if empty.
+            """
+            rng = np.random.default_rng(self.random_state)
+
+            X_bg = []       # list of arrays shaped (k, 128)
+            bg_count = 0    # how many panels have been collected so far
+
+            for c in cands:
+                if bg_count >= cap:
+                    break
+
+                cad = getattr(c, "cadence", None)
+                if cad is None:
+                    continue
+
+                cad = np.asarray(cad, dtype=float)
+                if cad.ndim != 3 or cad.shape[0] != 6:
+                    continue
+
+                try:
+                    ds = self._downsample_cadence(cad)  # (6, 8, 16)
+                except Exception:
+                    # If downsampling fails for a candidate, skip it.
+                    continue
+
+                X6 = ds.reshape(6, -1)  # (6, 128)
+
+                remaining = cap - bg_count
+                if remaining >= 6:
+                    # Take all 6 panels.
+                    X_bg.append(X6)
+                    bg_count += 6
+                else:
+                    # Take a random subset of the 6 panels to fill exactly the remaining slots.
+                    idx = rng.choice(6, size=remaining, replace=False)
+                    X_bg.append(X6[idx])
+                    bg_count += remaining
+
+            if not X_bg:
+                return None
+
+            # Stack into one big matrix: (N_panels, 128)
+            X_all = np.vstack(X_bg)
+
+            # Embed into UMAP: (N_panels, 128) -> (N_panels, 2)
+            return self._umap.transform(X_all)
+
+        # Embed the two example candidates (good/bad).
+        Z_good = _embed_candidate_panels(c_good)
+        Z_bad = _embed_candidate_panels(c_bad)
+        if Z_good is None or Z_bad is None:
+            return
+
+        # Embed background cloud.
+        Z_all = _embed_background_panels(bg, cap=max_panels_background)
+        if Z_all is None:
+            return
+
+        # Delegate plotting to the Visualizer (single responsibility: filter computes, visualizer draws).
+        viz = Visualizer()
+        viz.plot_similarity_umap(
+            Z_all=Z_all,
+            Z_good=Z_good,
+            Z_bad=Z_bad,
+            s_good=float(c_good.similarity_score),
+            s_bad=float(c_bad.similarity_score),
+            filename=filename,
+            on_idx=tuple(self._on_indices),
+            off_idx=tuple(self._off_indices),
+        )
