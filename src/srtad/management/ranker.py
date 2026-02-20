@@ -15,17 +15,6 @@ class Ranker:
     - Top percentile by Similarity score per (target, band)
     - Top-K candidates considering both scores equally (combined)
     - Random control sample
-
-    Notes
-    -----
-    - In current dataset, target metadata is not available, so candidates
-      are expected to have target set to a constant placeholder ("UNKNOWN").
-      This collapses (target, band) stratification to band-only in practice.
-    - Candidates are expected to have:
-        - frequency_score (float in [0,1])
-        - similarity_score (float in [0,1])
-        - band (str) already set ("C", "K")
-        - target (str) already set ("UNKNOWN")
     """
 
     def __init__(self) -> None:

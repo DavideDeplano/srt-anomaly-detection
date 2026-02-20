@@ -54,14 +54,13 @@ class Dataset:
 
         # Regex used to parse drift rate and frequency from the PNG filename
         self._rx = re.compile(
-          r"^.*(?:"
-          r"_dr_(?P<dr1>[-+0-9.eE]+)_freq_(?P<freq1>[-+0-9.eE]+)"
-          r"|"
-          r"_(?P<freq2>[-+0-9.]+)MHz.*"
-          r")\.png$",
-          re.IGNORECASE
-        ) 
-
+            r"^(?P<tic>TIC\d+).*?(?:"
+            r"_dr_(?P<dr1>[-+0-9.eE]+)_freq_(?P<freq1>[-+0-9.eE]+)"
+            r"|"
+            r"_(?P<freq2>[-+0-9.]+)MHz.*"
+            r")\.png$",
+            re.IGNORECASE
+        )
 
     def load_simulated_cadences(
         self,
@@ -357,7 +356,8 @@ class Dataset:
                 cadence=cadence,
                 source_path=png
             )
-            candidate.set_target("UNKNOWN")  # To change when targets are aviable
+            tic = match.group("tic")
+            candidate.set_target(tic if tic is not None else "UNKNOWN")
             candidates.append(candidate)
 
         self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), search_dir)
