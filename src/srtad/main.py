@@ -1,8 +1,11 @@
 from pathlib import Path
 from typing import List, Tuple
 from joblib import Parallel, delayed
+from collections import Counter
+import numpy as np
 import sys
 import csv
+import pickle
 
 from src.srtad.simulation.generator import SimulationGenerator
 from src.srtad.core.dataset import Dataset
@@ -73,6 +76,7 @@ def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
     threshold = filters["density"]["threshold"]
 
     candidates = ds.load()
+    only_on_scores = []
 
     try:
       it = candidates
@@ -82,6 +86,8 @@ def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
       for candidate in it:
           score = density.calculate(candidate)
           candidate.set_density_score(score)
+          if score > 0:
+            only_on_scores.append(score)
 
           if candidate.density_score >= threshold:
               passed_candidates.append(candidate)
@@ -92,6 +98,19 @@ def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
         return [], []
 
     print(f"Filtered {len(passed_candidates)} candidates on {len(candidates)}")
+
+    only_on_scores = np.array(only_on_scores, dtype=float)
+    out_npy = Path(paths["results"]) / "density_real_only_on_scores.npy"
+    out_npy.parent.mkdir(parents=True, exist_ok=True)
+    np.save(out_npy, only_on_scores)
+    print(f"[OK] Saved real only-on scores: {out_npy}")
+
+    viz = Visualizer()
+    viz.plot_density_histogram(
+        only_on_scores,
+        threshold=threshold,
+        filename="density_real_hist.png"
+    )
 
     out_csv = Path(paths["results"]) / "passed_density.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +132,12 @@ def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
     # The category report is generated on the full set to allow manual inspection 
     # even when no candidate passes the density threshold
     create_category_report(candidates)
+
+    out_pkl = Path(paths["results"]) / "passed_candidates.pkl"
+    out_pkl.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_pkl, "wb") as f:
+        pickle.dump((passed_candidates, candidates), f)
+    print(f"[OK] Saved candidates to: {out_pkl}")
     
     return passed_candidates, candidates
 
@@ -146,7 +171,7 @@ def _score_one(idx: int, c: Candidate) -> Tuple[int, float, float]:
 def run_frequency_similarity_filters(
     passed_candidates: List[Candidate],
     all_candidates: List[Candidate],
-) -> None:
+) -> List[Candidate]:
     """
     Fit and apply FrequencyFilter and SimilarityFilter on density-passed candidates.
 
@@ -159,23 +184,53 @@ def run_frequency_similarity_filters(
     - Training is executed once in the main process.
     - Scoring is parallelized across candidates.
     """
-    if not passed_candidates:
-        print("No candidates passed the density filter. Skipping.")
-        return
-    if not all_candidates:
-        print("No all_candidates available. Run density filter first (option 3).")
-        return
+    if not passed_candidates or not all_candidates:
+        pkl_path = Path(paths["results"]) / "passed_candidates.pkl"
+        if pkl_path.exists():
+            import pickle
+            with open(pkl_path, "rb") as f:
+                passed_candidates, all_candidates = pickle.load(f)
+            print(f"[OK] Loaded {len(passed_candidates)} passed and "
+                f"{len(all_candidates)} total candidates from {pkl_path}")
+        else:
+            print("No candidates available. Run density filter first (option 3).")
+            return []
 
+    freq_hz = np.array([c.frequency_hz for c in passed_candidates])
+
+    # Safety: adapt n_bins to the actual number of candidates
+    n_bins = min(200, max(10, len(passed_candidates) // 10))
+
+    bin_edges = np.linspace(freq_hz.min(), freq_hz.max(), n_bins + 1)
+    bin_indices = np.digitize(freq_hz, bin_edges, right=False)
+
+    # Count candidates per frequency bin
+    bin_counts = Counter(bin_indices.tolist())
+
+    # Compute the 95th percentile of bin counts (top 5% noisiest bins)
+    counts_array = np.array(list(bin_counts.values()))
+    threshold_count = np.percentile(counts_array, 95)
+
+    # Identify noisy bins (above the 95th percentile threshold)
+    noisy_bins = {b for b, n in bin_counts.items() if n > threshold_count}
+
+    # Discard candidates falling into noisy frequency bins (paper §3.2)
+    n_before = len(passed_candidates)
+    passed_candidates = [
+        c for i, c in enumerate(passed_candidates)
+        if bin_indices[i] not in noisy_bins
+    ]
+    n_after = len(passed_candidates)
+
+    print(f"[FREQUENCY CUT] Removed {n_before - n_after} candidates "
+        f"({100*(n_before-n_after)/max(n_before,1):.1f}%) "
+        f"from {len(noisy_bins)} noisy frequency bins (top 5%).")
+    
     freq = FrequencyFilter()
     sim = SimilarityFilter()
 
     freq.fit(passed_candidates)
     sim.fit(passed_candidates)
-
-    for c in passed_candidates:
-        b = FrequencyFilter._extract_band(c)
-        if b is not None:
-            c.set_band(b)
 
     results = Parallel(n_jobs=-1, prefer="processes")(
         delayed(_score_one)(i, c) for i, c in enumerate(passed_candidates)
@@ -196,6 +251,7 @@ def run_frequency_similarity_filters(
     )
 
     print(f"Computed frequency+similarity scores for {len(passed_candidates)} candidates.")
+    return passed_candidates
 
 def run_ranking(candidates: List[Candidate]) -> None:
     """
@@ -208,9 +264,16 @@ def run_ranking(candidates: List[Candidate]) -> None:
     - candidate.target must be set (e.g. Dataset.load -> candidate.set_target("UNKNOWN"))
     """
     if not candidates:
-        print("No candidates available for ranking. Run filters first.")
-        return
-
+        pkl_path = Path(paths["results"]) / "passed_candidates.pkl"
+        if pkl_path.exists():
+            import pickle
+            with open(pkl_path, "rb") as f:
+                candidates, _ = pickle.load(f)
+            print(f"[OK] Loaded {len(candidates)} candidates from {pkl_path}")
+        else:
+            print("No candidates available. Run filters first.")
+            return
+    
     # Exclude bands not modeled 
     candidates = [c for c in candidates if c.band != "OUT_OF_BAND"]
 
@@ -290,7 +353,7 @@ def main() -> None:
         elif choice =="3":
             passed_candidates, all_candidates = run_density_filter()
         elif choice == "4":
-            run_frequency_similarity_filters(passed_candidates, all_candidates)
+            passed_candidates = run_frequency_similarity_filters(passed_candidates, all_candidates)
         elif choice == "5":
             run_ranking(passed_candidates)
         elif choice == "0":

@@ -5,8 +5,11 @@ This script:
 - Loads a real Breakthrough Listen .h5 file
 - Extracts a 2D time-frequency slice
 - Randomly crops a (tchans x fchans) region
-- Applies the same preprocessing used in the main pipeline
-- Saves the resulting noise patch to disk for reuse
+- Saves the raw noise patch to disk for reuse
+
+Note: no preprocessing is applied here. The preprocessing (_preprocess_spectrogram)
+is applied once in Dataset.load_simulated_cadences() at training time,
+symmetrically to how real candidates are handled in Dataset.load().
 """
 
 from pathlib import Path
@@ -74,13 +77,7 @@ f0 = int(rng.integers(0, F - fchans + 1))
 # Apply internal spectrogram preprocessing 
 noise = data2d[t0:t0 + tchans, f0:f0 + fchans]
 
-# Preprocessing (same pipeline used for real/simulated data)
-ds = Dataset()
-
-# Apply internal spectrogram preprocessing
-noise = ds._preprocess_spectrogram(noise)
-
-# Replace NaN / Inf values to ensure safe downstream usage
+noise = np.asarray(noise, dtype=np.float64)
 noise = np.nan_to_num(noise, nan=0.0, posinf=0.0, neginf=0.0)
 
 # Persist extracted background noise

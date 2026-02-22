@@ -32,13 +32,14 @@ class SimilarityFilter(IFilter):
     Raw score
     ---------
     The raw score is defined as:
-        raw = 1 - mean_d(ON-ON) / (mean_d(ON-OFF) + eps)
+        raw = 1 / (sum_d(ON-ON) / sum_d(ON-OFF) + eps)
 
     Interpretation
     --------------
     - ON panels should be close to each other (small ON-ON distance)
     - ON panels should be far from OFF panels (large ON-OFF distance)
-    - Therefore, larger raw scores indicate stronger ON/OFF separation and are scored higher
+    - Low ratio ON-ON/ON-OFF → high raw score → good candidate
+    - Always positive, no negative values possible
 
     Normalization
     -------------
@@ -264,7 +265,7 @@ class SimilarityFilter(IFilter):
 
         Definition
         ----------
-        raw = 1 - mean_d(ON-ON) / (mean_d(ON-OFF) + eps)
+        raw = 1 / (sum_d(ON-ON) / sum_d(ON-OFF) + eps)
 
         Guards
         ------
@@ -333,12 +334,12 @@ class SimilarityFilter(IFilter):
         if not on_on_dists or not on_off_dists:
             return 0.0
 
-        mean_on_on = float(np.mean(on_on_dists))
-        mean_on_off = float(np.mean(on_off_dists))
-
         # Epsilon avoids division by zero when ON panels collapse into nearly identical points
         eps = 1e-6
-        score_raw = 1.0 - (mean_on_on / (mean_on_off + eps))
+        sum_on_on = float(np.sum(on_on_dists))
+        sum_on_off = float(np.sum(on_off_dists))
+        ratio = sum_on_on / (sum_on_off + eps)
+        score_raw = 1.0 / (ratio + eps)
 
         if not math.isfinite(score_raw):
             return 0.0

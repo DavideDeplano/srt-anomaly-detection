@@ -91,7 +91,7 @@ class FrequencyFilter(IFilter):
         self._raw_max: float = 0.0
 
     @staticmethod
-    def _extract_band(candidate: Candidate) -> str:
+    def extract_band(candidate: Candidate) -> str:
         """
         Assign a band label based on the candidate central frequency
 
@@ -131,7 +131,7 @@ class FrequencyFilter(IFilter):
         # Group candidates by band label
         band_to_candidates: Dict[str, List[Candidate]] = {"C": [], "K": []}
         for c in candidates:
-            b = self._extract_band(c)
+            b = self.extract_band(c)
             if b in band_to_candidates:
                 band_to_candidates[b].append(c)
 
@@ -340,7 +340,8 @@ class FrequencyFilter(IFilter):
                 )
 
         # Map frequency to band
-        band = self._extract_band(candidate)
+        band = self.extract_band(candidate)
+        candidate.set_band(band)
         if band not in self._gmm_ensembles:
             # Out-of-band frequencies are not scored
             return 0.0
@@ -379,7 +380,7 @@ class FrequencyFilter(IFilter):
         Frequencies with low density (rare under training distribution) yield low mean_pdf
         and therefore high anomaly scores
         """
-        band = self._extract_band(candidate)
+        band = self.extract_band(candidate)
         if band is None or not self._gmm_ensembles.get(band):
             return 0.0
 

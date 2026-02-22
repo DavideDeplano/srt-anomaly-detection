@@ -93,6 +93,11 @@ class DensityFilter(IFilter):
         # Mapping: category_id -> fitted KernelDensity model.
         self._kdes: Dict[int, KernelDensity] = {}
 
+        self._Z_train: np.ndarray | None = None
+        self._y_train: np.ndarray | None = None
+        self._Z_val: np.ndarray | None = None
+        self._y_val: np.ndarray | None = None
+
     def fit(
         self,
         simulated_cadences: Iterable[Tuple[str, np.ndarray, Dict[str, Any]]],
@@ -135,27 +140,9 @@ class DensityFilter(IFilter):
         if models_exist:
             self._logger.info("[DENSITY FILTER] Existing models found; loading.")
             self._load_models()
-
-            # Optional: load cached UMAP points for plots (if available).
-            if self._cache_Z_train.exists() and self._cache_Z_val.exists():
-                try:
-                    Z_train = np.load(self._cache_Z_train)
-                    y_train = np.load(self._cache_y_train)
-                    Z_val = np.load(self._cache_Z_val)
-                    y_val = np.load(self._cache_y_val)
-                    if self._cache_probs.exists():
-                        probs_val = np.load(self._cache_probs)
-                    loaded_from_cache = True
-                    self._logger.info("Loaded UMAP points from cache.")
-                except Exception as e:
-                    self._logger.warning(f"Failed to load UMAP points from cache: {e}")
-                    loaded_from_cache = False
-
-        # If models exist, skip training entirely.
-        if models_exist:
             self._logger.info("[DENSITY FILTER] Models already trained; skipping training step.")
             return
-
+        
         # Accumulators for training samples.
         X: list[np.ndarray] = []
         y: list[int] = []
@@ -244,8 +231,7 @@ class DensityFilter(IFilter):
         missing = [k for k in range(self._n_categories) if k not in self._kdes]
         if missing:
             self._logger.warning(
-                f"[DENSITY FILTER] Missing KDEs for categories: {missing} "
-                "(argmax will be biased)"
+                "[DENSITY FILTER] Missing KDEs for categories: %s (argmax will be biased)", missing
             )
 
         # The only-on category must exist to define the returned score.
@@ -288,12 +274,6 @@ class DensityFilter(IFilter):
             off_cat=self._only_off_category,
             kde_on=self._kdes[self._only_on_category],
             kde_off=self._kdes[self._only_off_category]
-        )
-
-        viz.plot_density_histogram(
-            probs_val,
-            threshold=self._threshold,
-            filename="density_validation_hist.png"
         )
 
     def _derive_category(self, meta: Dict[str, Any]) -> int:
@@ -545,11 +525,11 @@ class DensityFilter(IFilter):
         if train_points_path.exists() and train_labels_path.exists():
             self._Z_train = np.load(train_points_path)
             self._y_train = np.load(train_labels_path)
-            self._logger.info(f"Loaded {len(self._Z_train)} training points")
+            self._logger.info("Loaded %d training points", len(self._Z_train))
         
         if val_points_path.exists() and val_labels_path.exists():
             self._Z_val = np.load(val_points_path)
             self._y_val = np.load(val_labels_path)
-            self._logger.info(f"Loaded {len(self._Z_val)} validation points")
+            self._logger.info("Loaded %d validation points", len(self._Z_val))
 
        

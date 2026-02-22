@@ -52,16 +52,27 @@ class Dataset:
         self._logger = logging.getLogger("srtad.dataset")
         self._use_tqdm = bool(use_tqdm)
 
-        # Regex used to parse drift rate and frequency from the PNG filename
-        self._rx = re.compile(
-            r"^(?P<tic>TIC\d+).*?(?:"
-            r"_dr_(?P<dr1>[-+0-9.eE]+)_freq_(?P<freq1>[-+0-9.eE]+)"
-            r"|"
-            r"_(?P<freq2>[-+0-9.]+)MHz.*"
-            r")\.png$",
+        # Regex used to parse target, drift rate and frequency from the PNG filename
+        self._rx_candidate = re.compile(
+            r"^candidate_\d+_(?P<freq>[\d.]+)MHz_P[\d.]+\.png$",
             re.IGNORECASE
         )
 
+        self._rx_generic = re.compile(
+            r"(?:_dr_(?P<dr>[-+0-9.eE]+))?_freq_(?P<freq1>[-+0-9.eE]+)|_(?P<freq2>[\d.]+)MHz",
+            re.IGNORECASE
+        )
+
+        self._rx_tic = re.compile(r"(?:^|[_\-])(?P<tic>TIC\d+)(?:[_\-]|$)", re.IGNORECASE)
+
+    @staticmethod
+    def _find_tic_in_parents(path: Path) -> str | None:
+        """Walk up the directory hierarchy looking for a folder named TIC<digits>."""
+        for parent in path.parents:
+            if re.match(r"^TIC\d+$", parent.name, re.IGNORECASE):
+                return parent.name
+        return None
+    
     def load_simulated_cadences(
         self,
         cadences_dir: Path | str,
@@ -165,25 +176,25 @@ class Dataset:
         self._logger.info("Loaded %d synthetic cadences from %s", len(cadences), cadences_dir)
         return cadences
 
-    def _crop_box(self, w: int, h: int, match: re.Match) -> tuple[int, int, int, int]:
+    def _crop_box(self, w: int, h: int, is_candidate_format: bool) -> tuple[int, int, int, int]:
         """
         Compute the crop rectangle as fixed fractions of image width/height.
 
         This removes fixed margins from the PNG image before further processing.
         """
-        if match.group("freq1") is not None:
-            return (
-                int(w * 0.0894),        # left margin
-                int(h * 0.044),         # top margin
-                int(w * (1 - 0.149)),   # right margin
-                int(h * (1 - 0.067)),   # bottom margin
-            )
-        else:
+        if is_candidate_format:
             return (
                 int(w * 0.0461),        # left margin
                 int(h * 0.1163),        # top margin
                 int(w * (1 - 0.086)),   # right margin
                 int(h * (1 - 0.04))     # bottom margin
+            )
+        else:
+            return (
+                int(w * 0.0894),        # left margin
+                int(h * 0.044),         # top margin
+                int(w * (1 - 0.149)),   # right margin
+                int(h * (1 - 0.067)),   # bottom margin
             )
 
     def _preprocess_spectrogram(self, data: np.ndarray) -> np.ndarray:
@@ -237,7 +248,7 @@ class Dataset:
             data = data / smooth_bandpass.reshape(1, -1)
 
         except Exception as e:
-            self._logger.warning(f"Scikit-learn B-spline fitting failed: {e}")
+            self._logger.warning(f"Scikit-learn B-spline fitting failed: %s", e)
 
         # Final safety: enforce finite output values.
         data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
@@ -262,25 +273,39 @@ class Dataset:
             return []
 
         candidates: List[Candidate] = []
+        skipped_files: List[str] = []
 
         png_iter = sorted(search_dir.rglob("*.png"))
         if self._use_tqdm and tqdm is not None:
             png_iter = tqdm(png_iter, desc="Loading real PNG candidates")
 
         for png in png_iter:
-            match = self._rx.match(png.name)
-            if not match:
-                self._logger.debug("Skipping file with unexpected name: %s", png.name)
-                continue
+            is_candidate_format = bool(self._rx_candidate.match(png.name))
 
-            # Parse drift and frequency values from the filename
-            if match.group("freq1") is not None:
-                drift_hz_s = float(match.group("dr1"))
-                freq_hz = float(match.group("freq1")) * 1e6
-            else:
-                freq_hz = float(match.group("freq2")) * 1e6
+            if is_candidate_format:
+                m = self._rx_candidate.match(png.name)
+                freq_hz = float(m.group("freq")) * 1e6
                 drift_hz_s = 0.0
+            else:
+                m = self._rx_generic.search(png.name)
+                if not m:
+                    self._logger.warning("Skipping file with unexpected name: %s", png.name)
+                    skipped_files.append(str(png))
+                    continue
+                if m.group("freq1") is not None:
+                    freq_hz = float(m.group("freq1")) * 1e6
+                    drift_hz_s = float(m.group("dr")) if m.group("dr") else 0.0
+                else:
+                    freq_hz = float(m.group("freq2")) * 1e6
+                    drift_hz_s = 0.0
 
+            # Target extraction 
+            tic_match = self._rx_tic.search(png.name)
+            if tic_match:
+                target = tic_match.group("tic")
+            else:
+                target = self._find_tic_in_parents(png) or png.parent.name
+                
             # Skip candidates falling into hard-coded notch frequency ranges
             if (1.2e9 <= freq_hz <= 1.33e9) or (2.3e9 <= freq_hz <= 2.36e9):
                 self._logger.info(
@@ -293,7 +318,7 @@ class Dataset:
                 with Image.open(png) as im:
                     im = im.convert("L")  # grayscale: (H, W)
                     w, h = im.size
-                    cropped = im.crop(self._crop_box(w, h, match))
+                    cropped = im.crop(self._crop_box(w, h, is_candidate_format))
                     arr = np.asarray(cropped, dtype=np.float64)
             except Exception as exc:
                 self._logger.error("Failed to load or process image %s: %s", png, exc)
@@ -356,9 +381,21 @@ class Dataset:
                 cadence=cadence,
                 source_path=png
             )
-            tic = match.group("tic")
-            candidate.set_target(tic if tic is not None else "UNKNOWN")
+            candidate.set_target(target if target else "UNKNOWN")
             candidates.append(candidate)
+
+        # Save skipped files report
+        if skipped_files:
+            skipped_path = Path("results") / "skipped_files.txt"
+            skipped_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(skipped_path, "w") as f:
+                f.write(f"Skipped {len(skipped_files)} files with unexpected filename format:\n\n")
+                for p in skipped_files:
+                    f.write(f"{p}\n")
+            self._logger.warning(
+                "%d files skipped due to unexpected filename format. See: %s",
+                len(skipped_files), skipped_path
+            )
 
         self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), search_dir)
         return candidates
