@@ -32,7 +32,7 @@ class SimilarityFilter(IFilter):
     Raw score
     ---------
     The raw score is defined as:
-        raw = 1 / (sum_d(ON-ON) / sum_d(ON-OFF) + eps)
+        raw = 1 / (sum_d(ON-ON) / (sum_d(ON-OFF) + 1) + eps)
 
     Interpretation
     --------------
@@ -265,7 +265,7 @@ class SimilarityFilter(IFilter):
 
         Definition
         ----------
-        raw = 1 / (sum_d(ON-ON) / sum_d(ON-OFF) + eps)
+        raw = 1 / (sum_d(ON-ON) / (sum_d(ON-OFF) + 1) + eps)
 
         Guards
         ------
@@ -338,8 +338,7 @@ class SimilarityFilter(IFilter):
         eps = 1e-6
         sum_on_on = float(np.sum(on_on_dists))
         sum_on_off = float(np.sum(on_off_dists))
-        ratio = sum_on_on / (sum_on_off + eps)
-        score_raw = 1.0 / (ratio + eps)
+        score_raw = 1.0 / (sum_on_on / (sum_on_off + 1.0) + eps)
 
         if not math.isfinite(score_raw):
             return 0.0

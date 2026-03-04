@@ -17,6 +17,7 @@ from src.srtad.ml.filters.frequency import FrequencyFilter
 from src.srtad.ml.filters.similarity import SimilarityFilter
 from src.srtad.management.ranker import Ranker
 from src.srtad.management.visualizer import Visualizer
+from scripts.umap_reverse_search import UMAPReverseSearch
 
 try:
     from tqdm.auto import tqdm
@@ -56,65 +57,73 @@ def run_fit_density() -> None:
 
     print("Density model training completed and saved.\n")
 
-def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
+def run_density_filter() -> tuple:
     """
-    Apply the DensityFilter to real candidates.
-
-    Workflow:
-    - Load all real candidates from paths["real_png_dir"]
-    - Compute a density score for each candidate
-    - Retain only candidates whose score exceeds the configured threshold
-
-    Side effect:
-    - A category report PDF is generated for ALL candidates
-      (both passed and rejected) to allow manual inspection.
+    Apply DensityFilter to real candidates with adaptive threshold
+    and Figure 4-style diagnostic plot.
     """
     real_dir = Path(paths["real_png_dir"])
     ds = Dataset(png_dir=real_dir, use_tqdm=True)
-    passed_candidates : List[Candidate] = []
     density = DensityFilter()
-    threshold = filters["density"]["threshold"]
-
+    
     candidates = ds.load()
-    only_on_scores = []
-
+    
+    # Collect scores for ALL candidates
+    all_p_only_on = []      # P_only_on for every candidate (for Figure 4 plot)
+    passed_p_only_on = []   # P_only_on only where argmax == only_on
+    
     try:
-      it = candidates
-      if tqdm is not None:
-          it = tqdm(candidates, desc="Density scoring", unit="candidate")
+        it = candidates
+        if tqdm is not None:
+            it = tqdm(candidates, desc="Density scoring", unit="candidate")
 
-      for candidate in it:
-          score = density.calculate(candidate)
-          candidate.set_density_score(score)
-          if score > 0:
-            only_on_scores.append(score)
-
-          if candidate.density_score >= threshold:
-              passed_candidates.append(candidate)
+        for candidate in it:
+            score, p_on, best_cat = density.calculate_with_details(candidate)
+            candidate.set_density_score(score)
+            
+            # Collect P_only_on for ALL candidates (for the histogram)
+            all_p_only_on.append(p_on)
+            
+            # Collect only-on scores where argmax matched
+            if score > 0:
+                passed_p_only_on.append(score)
 
     except RuntimeError as e:
         print(f"[ERROR] {e}")
-        print("You must train the Density model first (option 2).")
         return [], []
 
-    print(f"Filtered {len(passed_candidates)} candidates on {len(candidates)}")
-
-    only_on_scores = np.array(only_on_scores, dtype=float)
-    out_npy = Path(paths["results"]) / "density_real_only_on_scores.npy"
-    out_npy.parent.mkdir(parents=True, exist_ok=True)
-    np.save(out_npy, only_on_scores)
-    print(f"[OK] Saved real only-on scores: {out_npy}")
-
+    all_p_only_on = np.array(all_p_only_on, dtype=float)
+    passed_p_only_on = np.array(passed_p_only_on, dtype=float)
+    
+    # Save arrays for later analysis
+    results_dir = Path(paths["results"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+    np.save(results_dir / "density_all_p_only_on.npy", all_p_only_on)
+    np.save(results_dir / "density_passed_p_only_on.npy", passed_p_only_on)
+    
+    # Plot and compute adaptive threshold
     viz = Visualizer()
-    viz.plot_density_histogram(
-        only_on_scores,
-        threshold=threshold,
+    threshold = viz.plot_density_histogram(
+        all_probs=all_p_only_on,
+        passed_probs=passed_p_only_on,
+        threshold=None,  # let it compute adaptively
         filename="density_real_hist.png"
     )
+    
+    print(f"[DENSITY] Adaptive threshold: {threshold:.6f}")
+    print(f"[DENSITY] Candidates with argmax=Cat42: {len(passed_p_only_on)}")
+    print(f"[DENSITY] Candidates with P_only_on > 0: {np.sum(all_p_only_on > 0)}")
+    
+    # Apply threshold
+    passed_candidates = [
+        c for c in candidates
+        if c.density_score >= threshold
+    ]
+    
+    print(f"[DENSITY] Passed threshold: {len(passed_candidates)} / {len(candidates)}")
 
-    out_csv = Path(paths["results"]) / "passed_density.csv"
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-
+    # CSV output
+    out_csv = results_dir / "passed_density.csv"
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["id", "density_score", "frequency_mhz", "source_path"])
@@ -125,16 +134,14 @@ def run_density_filter() -> Tuple[List[Candidate], List[Candidate]]:
                 f"{c.frequency_hz / 1e6:.6f}",
                 str(c.source_path),
             ])
-
     print(f"[OK] CSV written: {out_csv}")
 
+    # Category report
     print("Generating category PDF for ALL candidates.")
-    # The category report is generated on the full set to allow manual inspection 
-    # even when no candidate passes the density threshold
     create_category_report(candidates)
 
-    out_pkl = Path(paths["results"]) / "passed_candidates.pkl"
-    out_pkl.parent.mkdir(parents=True, exist_ok=True)
+    # Save pickle
+    out_pkl = results_dir / "passed_candidates.pkl"
     with open(out_pkl, "wb") as f:
         pickle.dump((passed_candidates, candidates), f)
     print(f"[OK] Saved candidates to: {out_pkl}")
@@ -169,20 +176,17 @@ def _score_one(idx: int, c: Candidate) -> Tuple[int, float, float]:
     return idx, float(freq.calculate(c)), float(sim.calculate(c))
 
 def run_frequency_similarity_filters(
-    passed_candidates: List[Candidate],
-    all_candidates: List[Candidate],
-) -> List[Candidate]:
+    passed_candidates,
+    all_candidates,
+):
     """
     Fit and apply FrequencyFilter and SimilarityFilter on density-passed candidates.
-
-    Pipeline:
-    1) Fit both filters on the provided candidate list and persist models to disk.
-    2) Compute frequency and similarity scores for each candidate in parallel
-       using CPU-based multiprocessing.
-
-    Notes:
-    - Training is executed once in the main process.
-    - Scoring is parallelized across candidates.
+    
+    Adaptive behavior:
+    - Frequency bin cut is skipped when candidate count is below 200
+      (paper designed for ~10^6 candidates; aggressive binning on small
+      samples removes too many candidates)
+    - Band labels are assigned to ALL candidates for diagnostic plots
     """
     if not passed_candidates or not all_candidates:
         pkl_path = Path(paths["results"]) / "passed_candidates.pkl"
@@ -196,36 +200,36 @@ def run_frequency_similarity_filters(
             print("No candidates available. Run density filter first (option 3).")
             return []
 
-    freq_hz = np.array([c.frequency_hz for c in passed_candidates])
-
-    # Safety: adapt n_bins to the actual number of candidates
-    n_bins = min(200, max(10, len(passed_candidates) // 10))
-
-    bin_edges = np.linspace(freq_hz.min(), freq_hz.max(), n_bins + 1)
-    bin_indices = np.digitize(freq_hz, bin_edges, right=False)
-
-    # Count candidates per frequency bin
-    bin_counts = Counter(bin_indices.tolist())
-
-    # Compute the 95th percentile of bin counts (top 5% noisiest bins)
-    counts_array = np.array(list(bin_counts.values()))
-    threshold_count = np.percentile(counts_array, 95)
-
-    # Identify noisy bins (above the 95th percentile threshold)
-    noisy_bins = {b for b, n in bin_counts.items() if n > threshold_count}
-
-    # Discard candidates falling into noisy frequency bins (paper §3.2)
-    n_before = len(passed_candidates)
-    passed_candidates = [
-        c for i, c in enumerate(passed_candidates)
-        if bin_indices[i] not in noisy_bins
-    ]
-    n_after = len(passed_candidates)
-
-    print(f"[FREQUENCY CUT] Removed {n_before - n_after} candidates "
-        f"({100*(n_before-n_after)/max(n_before,1):.1f}%) "
-        f"from {len(noisy_bins)} noisy frequency bins (top 5%).")
+    # ---- ADAPTIVE FREQUENCY CUT ----
+    # The paper's 5% noisy-bin cut was designed for ~10^6 candidates.
+    # With < 200 candidates it removes too many; skip it.
+    MIN_CANDIDATES_FOR_FREQ_CUT = 200
     
+    if len(passed_candidates) >= MIN_CANDIDATES_FOR_FREQ_CUT:
+        freq_hz = np.array([c.frequency_hz for c in passed_candidates])
+        n_bins = min(200, max(10, len(passed_candidates) // 10))
+        bin_edges = np.linspace(freq_hz.min(), freq_hz.max(), n_bins + 1)
+        bin_indices = np.digitize(freq_hz, bin_edges, right=False)
+
+        bin_counts = Counter(bin_indices.tolist())
+        counts_array = np.array(list(bin_counts.values()))
+        threshold_count = np.percentile(counts_array, 95)
+        noisy_bins = {b for b, n in bin_counts.items() if n > threshold_count}
+
+        n_before = len(passed_candidates)
+        passed_candidates = [
+            c for i, c in enumerate(passed_candidates)
+            if bin_indices[i] not in noisy_bins
+        ]
+        n_after = len(passed_candidates)
+
+        print(f"[FREQUENCY CUT] Removed {n_before - n_after} candidates "
+            f"({100*(n_before-n_after)/max(n_before,1):.1f}%) "
+            f"from {len(noisy_bins)} noisy frequency bins (top 5%).")
+    else:
+        print(f"[FREQUENCY CUT] Skipped — only {len(passed_candidates)} candidates "
+              f"(need >= {MIN_CANDIDATES_FOR_FREQ_CUT} for frequency bin cut to be meaningful).")
+
     freq = FrequencyFilter()
     sim = SimilarityFilter()
 
@@ -239,6 +243,11 @@ def run_frequency_similarity_filters(
     for idx, f_score, s_score in results:
         passed_candidates[idx].set_frequency_score(f_score)
         passed_candidates[idx].set_similarity_score(s_score)
+
+    # ---- SET BAND FOR ALL CANDIDATES (needed for diagnostic plots) ----
+    for c in all_candidates:
+        if getattr(c, "band", None) is None:
+            c.set_band(FrequencyFilter.extract_band(c))
 
     viz = Visualizer()
     viz.plot_frequency_histogram_by_band(all_candidates, filename="frequency_hist.png")
@@ -342,6 +351,7 @@ def main() -> None:
         print("3) Run Density Filter")
         print("4) Run Frequency + Similarity Filters")
         print("5) Run Ranking")
+        print("6) UMAP Reverse Search")
         print("0) Exit")
 
         choice = input("Select: ").strip()
@@ -356,6 +366,12 @@ def main() -> None:
             passed_candidates = run_frequency_similarity_filters(passed_candidates, all_candidates)
         elif choice == "5":
             run_ranking(passed_candidates)
+        elif choice == "6":
+            searcher = UMAPReverseSearch()
+            searcher.load()
+            cid = input("Candidate ID to highlight (leave blank to skip): ").strip() or None
+            fig = searcher.plot(highlight_id=cid)
+            fig.show()
         elif choice == "0":
           sys.exit(0)
         else:

@@ -532,4 +532,70 @@ class DensityFilter(IFilter):
             self._y_val = np.load(val_labels_path)
             self._logger.info("Loaded %d validation points", len(self._Z_val))
 
-       
+    def calculate_with_details(self, candidate) -> tuple:
+        """
+        Like calculate(), but returns (score, p_only_on, best_cat).
+        
+        - score: same as calculate() (prob if best_cat==only_on, else 0.0)
+        - p_only_on: probability under the only-on KDE regardless of argmax
+        - best_cat: the argmax category
+        
+        This allows the pipeline to collect P_only_on for ALL candidates
+        (needed for the Figure 4-style plot).
+        """
+        # 1) Auto-load models if needed
+        if not self._kdes:
+            try:
+                self._load_models()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "DensityFilter.calculate_with_details: model files not found."
+                )
+
+        # 2) Retrieve cadence
+        cadence = getattr(candidate, "cadence", None)
+        if cadence is None:
+            return 0.0, 0.0, -1
+
+        cadence = np.asarray(cadence, dtype=float)
+        if cadence.ndim != 3 or cadence.shape[0] != 6:
+            return 0.0, 0.0, -1
+
+        # 3) CC features
+        try:
+            feats = self._feature_extractor.extract_features(cadence)
+        except Exception:
+            return 0.0, 0.0, -1
+
+        # 4) UMAP embedding
+        z = self._umap.transform(feats.reshape(1, -1))
+
+        # 5) Score all categories
+        log_dens = {}
+        for cat in range(self._n_categories):
+            kde = self._kdes.get(cat)
+            if kde is None:
+                log_dens[cat] = float("-inf")
+                continue
+            try:
+                lp = float(kde.score_samples(z)[0])
+            except Exception:
+                log_dens[cat] = float("-inf")
+                continue
+            log_dens[cat] = lp if math.isfinite(lp) else float("-inf")
+
+        # 6) Best category
+        best_cat = max(log_dens, key=log_dens.get)
+        best_logp = log_dens[best_cat]
+        best_prob = math.exp(best_logp) if best_logp > float("-inf") else 0.0
+
+        # 7) P_only_on (regardless of argmax)
+        logp_on = log_dens.get(self._only_on_category, float("-inf"))
+        p_only_on = math.exp(logp_on) if logp_on > float("-inf") else 0.0
+
+        candidate.set_category(best_cat)
+
+        # 8) Score (same logic as calculate)
+        score = float(best_prob) if best_cat == self._only_on_category else 0.0
+
+        return score, p_only_on, best_cat  

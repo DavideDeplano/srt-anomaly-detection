@@ -133,33 +133,175 @@ class Visualizer:
         self._logger.info(f"Saved UMAP plot with KDE contours to {out_path}")
         
     def plot_density_histogram(
-        self, 
-        densities: np.ndarray, 
-        threshold: float = 0.0618,
+        self,
+        all_probs: np.ndarray,
+        passed_probs: np.ndarray,
+        threshold: float = None,
         filename: str = "density_histogram.png"
-    ) -> None:
-        if densities is None or densities.size == 0:
-            return
-
-        densities = densities[densities > 0]
-
-        if densities.size == 0:
-            return
-
-        plt.figure(figsize=(10, 6))
-        plt.hist(densities, bins=100, color='steelblue', log=True, edgecolor='none')
+    ) -> float:
+        """
+        Plot distribution of P(only-on) for all candidates, 
+        matching Figure 4 of Pardo 2025.
         
-        plt.axvline(threshold, color='green', linestyle='--', linewidth=2, label=f'Threshold {threshold}')
+        Parameters
+        ----------
+        all_probs : np.ndarray
+            P_only_on for ALL real candidates (including zeros).
+        passed_probs : np.ndarray  
+            P_only_on only for candidates where argmax == only_on (score > 0).
+        threshold : float or None
+            If None, compute adaptive threshold from data.
+        filename : str
+            Output filename.
+            
+        Returns
+        -------
+        float
+            The threshold used (computed or provided).
+        """
+        if all_probs is None or all_probs.size == 0:
+            return 0.0
+
+        # Compute adaptive threshold if not provided
+        if threshold is None:
+            threshold = self._compute_adaptive_threshold(passed_probs)
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
         
-        plt.title("Distribution of 'Only-ON' Probabilities")
-        plt.xlabel("Probability (Density)")
-        plt.ylabel("Counts (Log Scale)")
-        plt.legend()
+        # --- Left panel: ALL candidates (like Figure 4 of paper) ---
+        ax1 = axes[0]
+        # Filter to only positive values for the histogram
+        pos_probs = all_probs[all_probs > 0]
         
+        if pos_probs.size > 0:
+            ax1.hist(
+                pos_probs, 
+                bins=min(100, max(20, pos_probs.size // 5)),
+                color='steelblue', 
+                edgecolor='white',
+                linewidth=0.3,
+                log=True
+            )
+        
+        ax1.axvline(
+            threshold, color='green', linestyle='--', 
+            linewidth=2, label=f'Threshold {threshold:.4f}'
+        )
+        
+        # Count how many pass
+        n_above = np.sum(all_probs >= threshold)
+        n_total = len(all_probs)
+        n_positive = np.sum(all_probs > 0)
+        
+        ax1.set_title(
+            f"P(only-on) — All candidates\n"
+            f"Total: {n_total}, P>0: {n_positive}, Above threshold: {n_above}",
+            fontsize=11
+        )
+        ax1.set_xlabel("P(only on-target)")
+        ax1.set_ylabel("Counts (log scale)")
+        ax1.legend(fontsize=10)
+        ax1.grid(True, alpha=0.2)
+
+        # --- Right panel: only passed candidates (argmax == only_on) ---
+        ax2 = axes[1]
+        
+        if passed_probs is not None and passed_probs.size > 0:
+            ax2.hist(
+                passed_probs,
+                bins=min(50, max(10, passed_probs.size // 3)),
+                color='forestgreen',
+                edgecolor='white',
+                linewidth=0.3,
+                alpha=0.8,
+            )
+            ax2.axvline(
+                threshold, color='green', linestyle='--',
+                linewidth=2, label=f'Threshold {threshold:.4f}'
+            )
+            
+            n_passed_above = np.sum(passed_probs >= threshold)
+            ax2.set_title(
+                f"P(only-on) — Argmax = Cat42 only\n"
+                f"Count: {len(passed_probs)}, Above threshold: {n_passed_above}",
+                fontsize=11
+            )
+        else:
+            ax2.set_title("No candidates with argmax = Cat42")
+        
+        ax2.set_xlabel("P(only on-target)")
+        ax2.set_ylabel("Counts")
+        ax2.legend(fontsize=10)
+        ax2.grid(True, alpha=0.2)
+
+        plt.tight_layout()
         out_path = self._output_dir / filename
-        plt.savefig(out_path, dpi=300)
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
         plt.close()
         self._logger.info(f"Saved density histogram to {out_path}")
+    
+        return threshold
+    
+    def _compute_adaptive_threshold(self, passed_probs: np.ndarray) -> float:
+        """
+        Compute an adaptive threshold from the distribution of 
+        P_only_on scores (only for candidates with argmax == only_on).
+        
+        Strategy: find the valley/gap in the distribution.
+        If too few points, fall back to the 25th percentile.
+        
+        Parameters
+        ----------
+        passed_probs : np.ndarray
+            Scores > 0 (candidates where argmax == only_on category).
+            
+        Returns
+        -------
+        float
+            Adaptive threshold value.
+        """
+        if passed_probs is None or passed_probs.size < 5:
+            self._logger.warning(
+                "Too few only-on candidates (%d) for adaptive threshold; "
+                "using fallback.",
+                0 if passed_probs is None else passed_probs.size
+            )
+            return 0.01  # Safe fallback
+        
+        # Method: use histogram valley detection
+        # Bin the data and look for the first local minimum after the peak
+        n_bins = min(50, max(10, passed_probs.size // 3))
+        counts, bin_edges = np.histogram(passed_probs, bins=n_bins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Smooth counts to avoid noise
+        if len(counts) >= 5:
+            from scipy.ndimage import uniform_filter1d
+            smoothed = uniform_filter1d(counts.astype(float), size=3)
+        else:
+            smoothed = counts.astype(float)
+        
+        # Find first local minimum (valley) from the left
+        threshold = None
+        for i in range(1, len(smoothed) - 1):
+            if smoothed[i] < smoothed[i-1] and smoothed[i] <= smoothed[i+1]:
+                # Found a valley — use its position as threshold
+                threshold = bin_centers[i]
+                break
+        
+        if threshold is None:
+            # No valley found — use 25th percentile as fallback
+            threshold = float(np.percentile(passed_probs, 25))
+            self._logger.info(
+                "No valley found in distribution; using 25th percentile: %.4f",
+                threshold
+            )
+        else:
+            self._logger.info(
+                "Adaptive threshold from valley detection: %.4f", threshold
+            )
+        
+        return threshold
 
     def plot_frequency_histogram_by_band(
         self,

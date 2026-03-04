@@ -44,10 +44,13 @@ ranker:
 filters:
   # Density filter (UMAP + KDE on 15-D CC features)
   density:
-    # UMAP hyperparameters
-    n_neighbors: 25
-    min_dist: 0.01
-    umap_metric: "canberra"
+    # UMAP hyperparameters (paper 25 - 0.01 - canberra)
+    # NOTE: try 50 - 0.1 - cosine
+    #           100 - 0.3 - correlation
+    #           75 - 0.2 - cosine
+    n_neighbors: 50
+    min_dist: 0.1
+    umap_metric: "cosine"
     n_components: 2
 
     # KDE hyperparameters

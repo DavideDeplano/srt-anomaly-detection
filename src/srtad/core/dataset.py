@@ -293,10 +293,10 @@ class Dataset:
                     skipped_files.append(str(png))
                     continue
                 if m.group("freq1") is not None:
-                    freq_hz = float(m.group("freq1")) * 1e6
+                    freq_hz = float(m.group("freq1").strip(".")) * 1e6
                     drift_hz_s = float(m.group("dr")) if m.group("dr") else 0.0
                 else:
-                    freq_hz = float(m.group("freq2")) * 1e6
+                    freq_hz = float(m.group("freq2").strip(".")) * 1e6
                     drift_hz_s = 0.0
 
             # Target extraction 

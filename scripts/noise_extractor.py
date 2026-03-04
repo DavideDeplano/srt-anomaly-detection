@@ -21,7 +21,7 @@ from srtad.config import paths, simulation, random_seed
 from srtad.core.dataset import Dataset
 
 # Input .h5 file
-H5_PATH = Path("content/hdd_esterno/TIC_H5/guppi_60703_21005_031211_TIC168699373_OFF_0001.0000.h5")
+H5_PATH = Path("/content/hdd_esterno/gbezze/TIC_H5/guppi_60703_21005_031211_TIC168699373_OFF_0001.0000.h5")
 
 # Parameters from configuration
 # Fixed random seed to ensure reproducible noise extraction

@@ -97,12 +97,12 @@ class FrequencyFilter(IFilter):
 
         Band (SRT receivers)
         ---------------------------------------------
-        - C band:    5.7-7.7 GHz
+        - C band:    4.2-7.7 GHz
         - K band:    18-26.5 GHz
         """
         f = candidate.frequency_hz
 
-        if 5.7e9 <= f <= 7.7e9:
+        if 4.2e9 <= f <= 7.7e9:
           return "C"
       
         if 18.0e9 <= f <= 26.5e9:
@@ -111,16 +111,12 @@ class FrequencyFilter(IFilter):
         # Frequency outside the supported band ranges
         return "OUT_OF_BAND"
 
-    def fit(self, candidates: Iterable[Candidate]) -> None:
+    def fit(self, candidates):
         """
-        Train the GMM bagging ensembles for each band and persist them to disk
-
-        Steps
-        -----
-        1) Group candidates by band using _extract_band
-        2) For each band, train n_bags GMMs on random subsamples (bagging)
-        3) Compute global min/max of raw scores over the training set
-        4) Save ensembles and scaling parameters
+        Train the GMM bagging ensembles for each band and persist them to disk.
+        
+        Automatically adapts n_components and bag_size to the actual
+        number of candidates available (critical for small datasets).
         """
         self._logger.info(
             "[FREQUENCY FILTER] Training mode: fitting GMM ensembles over frequencies..."
@@ -129,7 +125,7 @@ class FrequencyFilter(IFilter):
         candidates = list(candidates)
 
         # Group candidates by band label
-        band_to_candidates: Dict[str, List[Candidate]] = {"C": [], "K": []}
+        band_to_candidates = {"C": [], "K": []}
         for c in candidates:
             b = self.extract_band(c)
             if b in band_to_candidates:
@@ -149,13 +145,31 @@ class FrequencyFilter(IFilter):
                 )
                 continue
 
+            # --- ADAPTIVE n_components ---
+            # Rule: at most n_candidates // 2, minimum 1, capped by config
+            configured_components = self._components[band_name]
+            adaptive_components = max(1, min(configured_components, n_candidates // 2))
+            
+            if adaptive_components < configured_components:
+                self._logger.warning(
+                    "[FREQUENCY FILTER] Band %s: adapted n_components from %d to %d "
+                    "(only %d candidates available).",
+                    band_name, configured_components, adaptive_components, n_candidates,
+                )
+
+            # --- ADAPTIVE bag_size ---
+            # With few candidates, bag_size = n_candidates (no subsampling)
+            adaptive_bag_size = min(self._bag_size, n_candidates)
+
             self._logger.info(
                 "[FREQUENCY FILTER] Band %s: %d candidates, "
-                "n_components=%d, n_bags=%d, bag_size=%d",
+                "n_components=%d (config=%d), n_bags=%d, bag_size=%d (config=%d)",
                 band_name,
                 n_candidates,
-                self._components[band_name],
+                adaptive_components,
+                configured_components,
                 self._n_bags,
+                adaptive_bag_size,
                 self._bag_size,
             )
 
@@ -177,16 +191,15 @@ class FrequencyFilter(IFilter):
             self._gmm_ensembles[band_name] = []
 
             for _ in iterator:
-                current_bag_size = min(self._bag_size, n_candidates)
-                if current_bag_size <= 0:
+                if adaptive_bag_size <= 0:
                     continue
 
                 # Sample without replacement to diversify bags
-                idx = rng.choice(n_candidates, size=current_bag_size, replace=False)
+                idx = rng.choice(n_candidates, size=adaptive_bag_size, replace=False)
                 sample = freqs[idx]
 
-                # Sample without replacement to diversify bags
-                n_comp = min(self._components[band_name], current_bag_size)
+                # Ensure n_comp doesn't exceed sample size
+                n_comp = min(adaptive_components, len(sample))
                 if n_comp < 1:
                     continue
 
@@ -206,6 +219,7 @@ class FrequencyFilter(IFilter):
         self._save_models()
 
         self._logger.info("[FREQUENCY FILTER] Fit complete.")
+
 
     def _compute_scaling(self, band_to_candidates: Dict[str, List[Candidate]]) -> None:
         """
