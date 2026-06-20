@@ -41,6 +41,12 @@ class Candidate:
         self._cadence = cadence
         self._source_path = source_path
 
+        # Min-max (non-bandpassed) cadence used by the similarity filter.
+        # The density/frequency filters use the bandpassed `cadence`; the
+        # bandpass correction removes persistent narrowband lines, so the
+        # similarity filter instead works on this min-max representation.
+        self._cadence_raw: np.ndarray | None = None
+
         # --- Outputs from pipeline filters ---
         # NOTE: "category" is a diagnostic helper, not a semantic label
         # It stores the argmax category assigned by the FIRST-stage density filter
@@ -63,6 +69,9 @@ class Candidate:
         # Band information extracted from the candidate's frequency, used for band-specific ranking
         self._band: str | None = None
 
+        # Anomaly score produced by the AE filter
+        self._ae_score: float | None = None
+
     @property
     def id(self) -> str:
         """Unique identifier for this candidate."""
@@ -84,8 +93,25 @@ class Candidate:
         Full cadence tensor with shape (6, H, W).
 
         The 6 panels represent the ON/OFF observation pattern used in the pipeline.
+        This is the bandpassed (Pardo-style) representation used by the density
+        and frequency filters.
         """
         return self._cadence
+
+    @property
+    def cadence_raw(self) -> np.ndarray | None:
+        """
+        Min-max (non-bandpassed) cadence tensor with shape (6, H, W).
+
+        Used by the similarity filter. The bandpass correction applied to
+        `cadence` removes persistent narrowband signals; this representation
+        preserves them, so the similarity filter scores on it instead.
+        """
+        return self._cadence_raw
+
+    def set_cadence_raw(self, value: np.ndarray) -> None:
+        """Set the min-max (non-bandpassed) cadence for the similarity filter."""
+        self._cadence_raw = np.asarray(value, dtype=float)
 
     @property
     def source_path(self) -> Path:
@@ -154,6 +180,15 @@ class Candidate:
         """Set the band information extracted from the candidate's frequency."""
         self._band = str(value)
 
+    @property
+    def ae_score(self) -> float | None:
+        """Reconstruction error score from the convolutional AutoencoderFilter."""
+        return self._ae_score
+    
+    def set_ae_score(self, value: float) -> None:
+        """Set the reconstruction error score from the convolutional AutoencoderFilter."""
+        self._ae_score = float(value)
+
     def to_summary(self) -> Dict[str, Any]:
         """Return a lightweight summary with metadata and computed scores."""
         return {
@@ -166,4 +201,5 @@ class Candidate:
             "target": self.target,
             "band": self.band,
             "source_path": str(self.source_path),
+            "ae_score": self.ae_score
         }

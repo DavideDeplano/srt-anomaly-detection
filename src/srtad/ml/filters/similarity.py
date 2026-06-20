@@ -19,6 +19,7 @@ except ImportError:
 class SimilarityFilter(IFilter):
     """
     ON/OFF similarity filter based on panel embeddings in a UMAP space
+    (Pardo et al. 2025, Section 3.3).
 
     Concept
     -------
@@ -29,17 +30,26 @@ class SimilarityFilter(IFilter):
         ON indices  = [0, 2, 4]
         OFF indices = [1, 3, 5]
 
-    Raw score
-    ---------
-    The raw score is defined as:
-        raw = 1 / (sum_d(ON-ON) / (sum_d(ON-OFF) + 1) + eps)
+    Input representation
+    --------------------
+    The filter reads `candidate.cadence_raw` (per-panel min-max, NO bandpass).
+    The bandpass correction applied to `candidate.cadence` removes persistent
+    narrowband lines (the morphology of a non-drifting candidate); the min-max
+    representation preserves them, which is what the similarity score needs.
+
+    Raw score (Pardo et al. 2025, eq. 3.3)
+    --------------------------------------
+        score = (1 + sum_{on,off} d^2) / (1 + sum_{on,on} d^2)
+
+    with squared Euclidean distances in the UMAP plane.
 
     Interpretation
     --------------
-    - ON panels should be close to each other (small ON-ON distance)
-    - ON panels should be far from OFF panels (large ON-OFF distance)
-    - Low ratio ON-ON/ON-OFF → high raw score → good candidate
-    - Always positive, no negative values possible
+    - ON panels should be close to each other (small sum_{on,on})
+    - ON panels should be far from OFF panels (large sum_{on,off})
+    - Higher score -> better candidate
+    - The symmetric +1 regularization keeps the score finite even when ON
+      panels collapse into a single point (no 1/x blow-up).
 
     Normalization
     -------------
@@ -82,19 +92,29 @@ class SimilarityFilter(IFilter):
             random_state=self.random_state,
         )
 
-        # Downsampling factors expected for the pipeline
-        # Frequency: 80 -> 16 via factor 5
-        # Time:      16 ->  8 via factor 2
         self._raw_min: float | None = None
         self._raw_max: float | None = None
 
-        # Downsampling factors (MANDATORY: 80->16 freq, 16->8 time)
+        # Downsampling factors (paper 3.3: 80->16 freq via 5, 16->8 time via 2)
         self._freq_downsample: int = 5
         self._time_downsample: int = 2
 
         # Fixed ON/OFF indices for the 6-panel cadence pattern
         self._on_indices: List[int] = [0, 2, 4]
         self._off_indices: List[int] = [1, 3, 5]
+
+    @staticmethod
+    def _get_cadence(candidate) -> "np.ndarray | None":
+        """
+        Return the cadence used by the similarity filter.
+
+        Prefers the min-max (non-bandpassed) `cadence_raw`; falls back to the
+        bandpassed `cadence` for backward compatibility with older pickles.
+        """
+        cad = getattr(candidate, "cadence_raw", None)
+        if cad is None:
+            cad = getattr(candidate, "cadence", None)
+        return cad
 
     def fit(self, candidates: Iterable[Candidate]) -> None:
         """
@@ -133,7 +153,7 @@ class SimilarityFilter(IFilter):
             )
 
         for c in iterator:
-            cadence = getattr(c, "cadence", None)
+            cadence = self._get_cadence(c)
             if cadence is None:
                 continue
 
@@ -153,7 +173,7 @@ class SimilarityFilter(IFilter):
                 continue
 
             # Flatten each panel for UMAP input
-            panels_flat = ds.reshape(6, -1)  # (6, 128)
+            panels_flat = ds.reshape(6, -1)
             for i in range(panels_flat.shape[0]):
                 X_panels.append(panels_flat[i])
 
@@ -261,17 +281,18 @@ class SimilarityFilter(IFilter):
     
     def _raw_similarity_score(self, candidate: Candidate) -> float:
         """
-        Compute the raw similarity score for a single candidate
+        Raw similarity score (Pardo et al. 2025, eq. 3.3).
 
-        Definition
-        ----------
-        raw = 1 / (sum_d(ON-ON) / (sum_d(ON-OFF) + 1) + eps)
+            score = (1 + sum_{on,off} d^2) / (1 + sum_{on,on} d^2)
+
+        with squared Euclidean distances in the UMAP plane.
+        Higher score = ON panels clustered together and far from OFF panels.
 
         Guards
         ------
         - Returns 0.0 if cadence is missing, malformed, or distances cannot be computed
         """
-        cadence = getattr(candidate, "cadence", None)
+        cadence = self._get_cadence(candidate)
         if cadence is None:
             return 0.0
 
@@ -281,15 +302,17 @@ class SimilarityFilter(IFilter):
 
         try:
             # Downsample cadence panels and flatten for UMAP transform
-            ds = self._downsample_cadence(cadence)          # (6, 8, 16)
-            panels_flat = ds.reshape(6, -1)                 # (6, 128)
+            ds = self._downsample_cadence(cadence)          # (6, new_H, new_W)
+            panels_flat = ds.reshape(6, -1)
 
-            # Safety check: expected flattened panel dimensionality
-            if panels_flat.shape[1] != 128:
+            # Expected flattened panel dimensionality, derived from the factors
+            expected = (16 // self._time_downsample) * (80 // self._freq_downsample)
+            if panels_flat.shape[1] != expected:
                 self._logger.warning(
-                    "[SIMILARITY FILTER] Unexpected feature size %d for candidate %s",
+                    "[SIMILARITY FILTER] Unexpected feature size %d (expected %d) for candidate %s",
                     panels_flat.shape[1],
-                    getattr(candidate, "id", "<no-id>")
+                    expected,
+                    getattr(candidate, "id", "<no-id>"),
                 )
                 return 0.0
 
@@ -312,33 +335,28 @@ class SimilarityFilter(IFilter):
         if len(on_idx) < 2 or len(off_idx) == 0:
             return 0.0
 
-        Z_on = Z[on_idx]    
-        Z_off = Z[off_idx]  
+        Z_on = Z[on_idx]
+        Z_off = Z[off_idx]
 
-        # Pairwise distances among ON panels (upper triangle)
-        on_on_dists: List[float] = []
+        # Sum of squared Euclidean distances among ON panels (upper triangle)
+        sum_on_on = 0.0
         for i in range(len(Z_on)):
             for j in range(i + 1, len(Z_on)):
-                d = np.linalg.norm(Z_on[i] - Z_on[j])
-                if math.isfinite(d):
-                    on_on_dists.append(float(d))
+                d = Z_on[i] - Z_on[j]
+                sum_on_on += float(np.dot(d, d))
 
-        # Pairwise distances between ON and OFF panels
-        on_off_dists: List[float] = []
+        # Sum of squared Euclidean distances between ON and OFF panels
+        sum_on_off = 0.0
         for i in range(len(Z_on)):
-            for j in range(len(Z_off)):
-                d = np.linalg.norm(Z_on[i] - Z_off[j])
-                if math.isfinite(d):
-                    on_off_dists.append(float(d))
+            for k in range(len(Z_off)):
+                d = Z_on[i] - Z_off[k]
+                sum_on_off += float(np.dot(d, d))
 
-        if not on_on_dists or not on_off_dists:
+        if not math.isfinite(sum_on_on) or not math.isfinite(sum_on_off):
             return 0.0
 
-        # Epsilon avoids division by zero when ON panels collapse into nearly identical points
-        eps = 1e-6
-        sum_on_on = float(np.sum(on_on_dists))
-        sum_on_off = float(np.sum(on_off_dists))
-        score_raw = 1.0 / (sum_on_on / (sum_on_off + 1.0) + eps)
+        # Symmetric +1 regularization (paper); no 1/x blow-up when ON panels collapse
+        score_raw = (1.0 + sum_on_off) / (1.0 + sum_on_on)
 
         if not math.isfinite(score_raw):
             return 0.0
@@ -525,7 +543,7 @@ class SimilarityFilter(IFilter):
             np.ndarray | None
                 (6, 2) array if successful, else None.
             """
-            cad = getattr(c, "cadence", None)
+            cad = self._get_cadence(c)
             if cad is None:
                 return None
 
@@ -565,7 +583,7 @@ class SimilarityFilter(IFilter):
                 if bg_count >= cap:
                     break
 
-                cad = getattr(c, "cadence", None)
+                cad = self._get_cadence(c)
                 if cad is None:
                     continue
 

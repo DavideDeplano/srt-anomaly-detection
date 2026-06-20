@@ -1,11 +1,13 @@
+import math
 from pathlib import Path
-from matplotlib.backends.backend_pdf import PdfPages
-from PIL import Image
+
 import numpy as np
 import matplotlib.pyplot as plt
-import math
+from matplotlib.backends.backend_pdf import PdfPages
+from PIL import Image
 
 from src.srtad.core.dataset import Dataset
+
 
 def create_category_report(
     candidates,

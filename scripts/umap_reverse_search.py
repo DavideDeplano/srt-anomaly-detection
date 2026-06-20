@@ -1,5 +1,5 @@
 """
-UMAPReverseSearch 
+UMAPReverseSearch
 
 Given a real candidate, project it into the trained UMAP space and
 visualize where it falls relative to all other candidates.
@@ -9,35 +9,31 @@ Useful for:
 - Finding morphologically similar candidates in the same UMAP region
 - Investigating whether multiple candidates correspond to the same RFI type
 
-Usage in Colab
---------------
-    from scripts.umap_reverse_search import UMAPReverseSearch
-
-    searcher = UMAPReverseSearch()
-    searcher.load()
-
-    # Project all real candidates and plot
-    fig = searcher.plot()
-    fig.show()
-
-    # Highlight a specific candidate
-    fig = searcher.plot(highlight_id="candidate_12_6924.92MHz_P0.810")
-    fig.show()
-
-    # Find neighbors in UMAP space
-    neighbors = searcher.find_neighbors("candidate_12_6924.92MHz_P0.810", radius=2.0)
+Interactive HTML features
+-------------------------
+- Click on a point to show metadata + source file path in the right panel.
+- Zoom with the mouse wheel; pan by dragging.
+- The legend is display-only.
+- No images embedded — HTML stays lightweight regardless of dataset size.
 """
 
+import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import plotly.graph_objects as go
+from typing import Dict, List, Optional, Set, Tuple
+
 import joblib
 import numpy as np
 
+from bokeh.plotting import figure
+from bokeh.models import ColumnDataSource, CustomJS, Div
+from bokeh.layouts import row
+from bokeh.embed import file_html
+from bokeh.resources import INLINE
+
 from src.srtad.config import filters, paths
 from src.srtad.core.candidate import Candidate
-from src.srtad.management.cross_correlation_extractor import CrossCorrelationExtractor
 from src.srtad.core.dataset import Dataset
+from src.srtad.management.cross_correlation_extractor import CrossCorrelationExtractor
 
 
 class UMAPReverseSearch:
@@ -45,27 +41,16 @@ class UMAPReverseSearch:
     Projects real SRT candidates into the trained UMAP density space
     and provides interactive visualization and nearest-neighbor search.
 
-    The class reuses the UMAP model trained by DensityFilter, avoiding
-    any additional training. It computes 15-dimensional cross-correlation
-    features from each candidate's cadence and transforms them via the
-    existing UMAP model.
-
     Attributes
     ----------
-    _umap_model : fitted UMAP model loaded from disk
-    _candidates : list of real Candidate objects successfully projected
-    _Z          : (N, 2) UMAP coordinates for each candidate in _candidates
-    _Z_val      : (M, 2) UMAP coordinates of the simulated validation set (background)
-    _y_val      : (M,)   category labels of the simulated validation set
-
-    Notes
-    -----
-    _candidates and _Z are always aligned: _candidates[i] corresponds to _Z[i].
-    Candidates that fail feature extraction are skipped entirely (not zero-padded),
-    so the plot only ever shows real projected data.
+    _umap_model  : fitted UMAP model loaded from disk
+    _candidates  : list of real Candidate objects successfully projected
+    _passed_ids  : set of candidate IDs that passed the density filter
+    _Z           : (N, 2) UMAP coordinates for each candidate in _candidates
+    _Z_val       : (M, 2) UMAP coordinates of the simulated validation set
+    _y_val       : (M,)   category labels of the simulated validation set
     """
 
-    # Band colors used in the interactive plot
     _BAND_COLORS: Dict[str, str] = {
         "C": "#00e5ff",
         "K": "#bd93f9",
@@ -73,37 +58,29 @@ class UMAPReverseSearch:
     }
 
     def __init__(self) -> None:
-        self._umap_path = Path(filters["density"]["umap_model_path"])
-        self._kde_dir = Path(filters["density"]["kde_models_dir"])
+        self._umap_path   = Path(filters["density"]["umap_model_path"])
+        self._kde_dir     = Path(filters["density"]["kde_models_dir"])
         self._results_dir = Path(paths["results"])
 
-        # Read category IDs from config — do not rely on magic numbers
         self._only_on_cat  = int(filters["density"]["only_on_category"])
         self._only_off_cat = int(filters["density"]["only_off_category"])
 
-        self._extractor = CrossCorrelationExtractor()
+        self._extractor  = CrossCorrelationExtractor()
         self._umap_model = None
         self._candidates: List[Candidate] = []
-        self._Z: Optional[np.ndarray] = None
+        self._passed_ids: Set[str] = set()
+        self._Z:     Optional[np.ndarray] = None
         self._Z_val: Optional[np.ndarray] = None
         self._y_val: Optional[np.ndarray] = None
 
     def load(self) -> "UMAPReverseSearch":
-        """
-        Load the UMAP model, real candidates, and optional validation background.
-
-        Must be called before project(), plot(), or find_neighbors().
-
-        Returns
-        -------
-        self : allows method chaining
-        """
         print("[1/3] Loading UMAP model...")
         self._umap_model = self._load_umap()
 
         print("[2/3] Loading real candidates...")
-        self._candidates = self._load_candidates()
-        print(f"      → {len(self._candidates)} candidates with density_score > 0")
+        self._candidates, self._passed_ids = self._load_candidates()
+        print(f"      → {len(self._candidates)} total candidates loaded")
+        print(f"      → {len(self._passed_ids)} passed density filter")
 
         print("[3/3] Loading simulated validation background...")
         self._Z_val, self._y_val = self._load_val_embedding()
@@ -115,27 +92,6 @@ class UMAPReverseSearch:
         return self
 
     def project(self) -> np.ndarray:
-        """
-        Project all loaded candidates into the UMAP space.
-
-        Computes 15-dimensional CC features from each candidate's cadence
-        and transforms them using the trained UMAP model.
-
-        Candidates that are missing cadence data or fail feature extraction
-        are skipped and logged — they are never zero-padded. After this call,
-        self._candidates contains only the successfully projected candidates,
-        aligned with self._Z row by row.
-
-        Returns
-        -------
-        Z : np.ndarray of shape (N, 2)
-            UMAP coordinates for each successfully projected candidate.
-
-        Raises
-        ------
-        RuntimeError
-            If no candidate can be projected (all cadences missing or broken).
-        """
         self._check_loaded()
 
         print(f"Projecting {len(self._candidates)} candidates into UMAP space...")
@@ -146,26 +102,21 @@ class UMAPReverseSearch:
 
         for c in self._candidates:
             cadence = getattr(c, "cadence", None)
-
             if cadence is None:
-                # Candidate was pickled without cadence data — skip entirely
                 n_skipped += 1
                 continue
-
             try:
                 feat = self._extractor.extract_features(cadence)
                 features.append(feat)
                 valid_candidates.append(c)
             except Exception as exc:
-                # Log the specific failure so the caller can investigate
                 print(f"[WARN] Skipping {c.id}: {type(exc).__name__}: {exc}")
                 n_skipped += 1
 
         if n_skipped > 0:
             print(
                 f"[WARN] {n_skipped}/{len(self._candidates)} candidates skipped "
-                f"(missing cadence or extraction error). "
-                f"Ensure the pickle was saved with cadence data included."
+                f"(missing cadence or extraction error)."
             )
 
         if not features:
@@ -174,15 +125,10 @@ class UMAPReverseSearch:
                 "failed extraction. Cannot build UMAP plot."
             )
 
-        # Keep _candidates aligned with _Z: only successfully projected ones
         self._candidates = valid_candidates
-
         X = np.array(features, dtype=np.float64)
         self._Z = self._umap_model.transform(X)
-        print(
-            f"Projection complete: {len(self._candidates)} candidates, "
-            f"shape {self._Z.shape}"
-        )
+        print(f"Projection complete: {len(self._candidates)} candidates, shape {self._Z.shape}")
         return self._Z
 
     def plot(
@@ -190,72 +136,227 @@ class UMAPReverseSearch:
         highlight_id: Optional[str] = None,
         max_bg_points: int = 30_000,
         save_html: bool = True,
-    ) -> go.Figure:
-        """
-        Generate an interactive Plotly scatter plot in UMAP space.
-
-        The plot shows:
-        - Simulated validation set as background (mixed/noise in gray,
-          only-ON in green, only-OFF in red)
-        - Real candidates colored by observing band (C=cyan, K=purple)
-        - Hover tooltips with ID, frequency, drift, band, and all scores
-        - Optional star marker to highlight a specific candidate
-
-        Parameters
-        ----------
-        highlight_id : str, optional
-            ID of the candidate to highlight with a yellow star marker.
-        max_bg_points : int
-            Maximum number of background simulation points to render
-            (subsampled for performance, default 30 000).
-        save_html : bool
-            If True, saves the interactive plot to results/umap_reverse_search.html.
-
-        Returns
-        -------
-        fig : plotly.graph_objects.Figure
-        """
-        # Project candidates if not done yet
+    ) -> None:
         if self._Z is None:
             self.project()
 
-        fig = go.Figure()
-
-        # Add simulated validation set as background
-        if self._Z_val is not None and self._y_val is not None:
-            fig = self._add_background(fig, max_bg_points)
-
-        # Add real candidates colored by band
-        fig = self._add_candidates(fig, highlight_id)
-
-        fig.update_layout(
-            title=dict(
-                text="UMAP Reverse Search — Real SRT Candidates",
-                font=dict(size=16, color="#ccd6f6"),
-            ),
-            plot_bgcolor="#0b0c10",
-            paper_bgcolor="#080a0f",
-            font=dict(color="#8892b0", family="monospace"),
-            legend=dict(
-                bgcolor="rgba(15,17,23,0.9)",
-                bordercolor="#1c2035",
-                borderwidth=1,
-                font=dict(size=11),
-            ),
-            xaxis=dict(title="UMAP X", gridcolor="#1c2035", zerolinecolor="#1c2035"),
-            yaxis=dict(title="UMAP Y", gridcolor="#1c2035", zerolinecolor="#1c2035"),
+        # ---- Bokeh figure ----
+        p = figure(
             width=950,
             height=780,
-            hovermode="closest",
+            title="UMAP Reverse Search — Real SRT Candidates",
+            tools="pan,wheel_zoom,reset,tap",
+            active_scroll="wheel_zoom",
+            active_drag="pan",
+            output_backend="webgl",
+        )
+        p.background_fill_color        = "#0b0c10"
+        p.border_fill_color            = "#080a0f"
+        p.title.text_color             = "#ccd6f6"
+        p.title.text_font_size         = "16px"
+        p.xaxis.axis_label             = "UMAP X"
+        p.yaxis.axis_label             = "UMAP Y"
+        p.xaxis.axis_label_text_color  = "#8892b0"
+        p.yaxis.axis_label_text_color  = "#8892b0"
+        p.xaxis.major_label_text_color = "#8892b0"
+        p.yaxis.major_label_text_color = "#8892b0"
+        p.xgrid.grid_line_color        = "#1c2035"
+        p.ygrid.grid_line_color        = "#1c2035"
+        p.toolbar.logo                 = None
+
+        # ---- Background: simulated validation set ----
+        if self._Z_val is not None and self._y_val is not None:
+            Z_bg, y_bg = self._Z_val, self._y_val
+            if len(Z_bg) > max_bg_points:
+                idx  = np.random.choice(len(Z_bg), max_bg_points, replace=False)
+                Z_bg = Z_bg[idx]
+                y_bg = y_bg[idx]
+
+            mask_on  = y_bg == self._only_on_cat
+            mask_off = y_bg == self._only_off_cat
+            mask_mix = ~mask_on & ~mask_off
+
+            if mask_mix.any():
+                p.scatter("x", "y",
+                          source=ColumnDataSource(dict(x=Z_bg[mask_mix,0].tolist(),
+                                                       y=Z_bg[mask_mix,1].tolist())),
+                          size=2, color="#969696", alpha=0.08,
+                          legend_label="Simulated (mixed/noise)")
+            if mask_off.any():
+                p.scatter("x", "y",
+                          source=ColumnDataSource(dict(x=Z_bg[mask_off,0].tolist(),
+                                                       y=Z_bg[mask_off,1].tolist())),
+                          size=3, color="#ff5064", alpha=0.25,
+                          legend_label="Simulated only-OFF")
+            if mask_on.any():
+                p.scatter("x", "y",
+                          source=ColumnDataSource(dict(x=Z_bg[mask_on,0].tolist(),
+                                                       y=Z_bg[mask_on,1].tolist())),
+                          size=3, color="#64ff50", alpha=0.25,
+                          legend_label="Simulated only-ON")
+
+        # ---- Candidate payload (metadata + source path only, no images) ----
+        payload: Dict[str, dict] = {}
+        for i, c in enumerate(self._candidates):
+            passed = c.id in self._passed_ids
+            payload[c.id] = {
+                "passed":           passed,
+                "target":           getattr(c, "target", "UNKNOWN"),
+                "band":             getattr(c, "band", "?"),
+                "freq_mhz":         c.frequency_hz / 1e6,
+                "drift_hz_s":       float(c.drift_hz_s),
+                "umap_x":           float(self._Z[i, 0]),
+                "umap_y":           float(self._Z[i, 1]),
+                "density_score":    c.density_score,
+                "frequency_score":  getattr(c, "frequency_score", None),
+                "similarity_score": getattr(c, "similarity_score", None),
+                "source_path":      str(getattr(c, "source_path", "")),
+            }
+
+        # ---- Side panel Div ----
+        panel_div = Div(
+            text="""
+            <div style="width:380px;background:#0d0f16;border-left:1px solid #1c2035;
+                        padding:18px 16px;font-family:monospace;color:#8892b0;
+                        font-size:12px;text-align:center;padding-top:40px;">
+                Click a point to inspect
+            </div>
+            """,
+            width=400,
+            height=780,
+            styles={"background": "#0d0f16", "border-left": "1px solid #1c2035"},
         )
 
+        # ---- Real candidates per band ----
+        for band, color in self._BAND_COLORS.items():
+            idxs = [
+                i for i, c in enumerate(self._candidates)
+                if getattr(c, "band", "OUT_OF_BAND") == band
+            ]
+            if not idxs:
+                continue
+
+            src = ColumnDataSource(dict(
+                x   = [float(self._Z[i, 0]) for i in idxs],
+                y   = [float(self._Z[i, 1]) for i in idxs],
+                cid = [self._candidates[i].id for i in idxs],
+            ))
+
+            p.scatter(
+                "x", "y",
+                source=src,
+                size=10,
+                color=color,
+                line_color="white",
+                line_width=1.5,
+                legend_label=f"Real — {band} band",
+                name=f"band_{band}",
+            )
+
+            cb = CustomJS(
+                args=dict(source=src, panel=panel_div, payload=payload),
+                code="""
+                const indices = source.selected.indices;
+                if (indices.length === 0) return;
+
+                const cid = source.data['cid'][indices[0]];
+                const d   = payload[cid];
+                if (!d) return;
+
+                const fmt = v =>
+                    (v !== null && v !== undefined) ? Number(v).toExponential(3) : '—';
+
+                panel.text = `
+                <div style="width:380px;background:#0d0f16;border-left:1px solid #1c2035;
+                             padding:18px 16px;font-family:monospace;color:#ccd6f6;
+                             overflow-y:auto;">
+                    <div style="font-size:11px;font-weight:bold;
+                                color:${d.passed ? '#64ffda' : '#ff5064'};
+                                margin-bottom:4px;">
+                        ${d.passed ? '✓ PASSED density filter' : '✗ rejected'}
+                    </div>
+                    <div style="font-size:12px;font-weight:bold;color:#ccd6f6;
+                                word-break:break-all;margin-bottom:12px;">${cid}</div>
+                    <table style="font-size:12px;border-collapse:collapse;width:100%;
+                                  margin-bottom:8px;">
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">Target</td>
+                            <td>${d.target || 'UNKNOWN'}</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">Band</td>
+                            <td>${d.band || '?'}</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">Frequency</td>
+                            <td>${d.freq_mhz.toFixed(3)} MHz</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">Drift</td>
+                            <td>${d.drift_hz_s.toFixed(4)} Hz/s</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">Density</td>
+                            <td>${fmt(d.density_score)}</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#8892b0;padding:3px 8px 3px 0;
+                                       white-space:nowrap;">UMAP</td>
+                            <td>(${d.umap_x.toFixed(2)}, ${d.umap_y.toFixed(2)})</td>
+                        </tr>
+                    </table>
+                    <div style="padding:8px;background:#111520;border:1px solid #1c2035;
+                                border-radius:4px;word-break:break-all;font-size:11px;
+                                color:#8892b0;">
+                        <span style="color:#64ffda;">Path:</span><br/>
+                        ${d.source_path || '—'}
+                    </div>
+                </div>`;
+                """,
+            )
+            src.selected.js_on_change("indices", cb)
+
+        # ---- Highlighted candidate ----
+        if highlight_id is not None:
+            for i, c in enumerate(self._candidates):
+                if c.id == highlight_id:
+                    src_hl = ColumnDataSource(dict(
+                        x   = [float(self._Z[i, 0])],
+                        y   = [float(self._Z[i, 1])],
+                        cid = [c.id],
+                    ))
+                    p.scatter(
+                        "x", "y",
+                        source=src_hl,
+                        size=22,
+                        color="yellow",
+                        marker="star",
+                        line_color="black",
+                        line_width=2,
+                        legend_label=f"★ {highlight_id}",
+                    )
+                    break
+
+        # ---- Legend: display-only ----
+        p.legend.background_fill_color = "rgba(15,17,23,0.9)"
+        p.legend.border_line_color     = "#1c2035"
+        p.legend.label_text_color      = "#8892b0"
+        p.legend.label_text_font_size  = "11px"
+        p.legend.click_policy          = "none"
+
+        # ---- Save ----
         if save_html:
+            layout   = row(p, panel_div)
             out_path = self._results_dir / "umap_reverse_search.html"
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            fig.write_html(str(out_path), full_html=True, include_plotlyjs=True)
+            html = file_html(layout, resources=INLINE, title="UMAP Reverse Search — SRT")
+            out_path.write_text(html, encoding="utf-8")
             print(f"[OK] Interactive plot saved to: {out_path}")
-
-        return fig
 
     def find_neighbors(
         self,
@@ -263,36 +364,9 @@ class UMAPReverseSearch:
         radius: float = 2.0,
         top_k: int = 10,
     ) -> List[Dict]:
-        """
-        Find the nearest candidates to a target in the UMAP space.
-
-        Searches within a Euclidean radius and returns the closest matches,
-        ordered by ascending distance. Useful for identifying candidates
-        that share morphological characteristics with the target.
-
-        Note: UMAP does not preserve Euclidean distances reliably. Results
-        are meaningful for visual exploration but should not be treated as
-        physically robust similarity measures.
-
-        Parameters
-        ----------
-        candidate_id : str
-            ID of the reference candidate.
-        radius : float
-            Search radius in UMAP coordinates (default 2.0).
-        top_k : int
-            Maximum number of neighbors to return (default 10).
-
-        Returns
-        -------
-        neighbors : list of dict
-            Each dict contains: id, distance, frequency_mhz, band,
-            density_score, frequency_score, similarity_score, umap_x, umap_y.
-        """
         if self._Z is None:
             self.project()
 
-        # Locate the target candidate by ID
         target_idx = next(
             (i for i, c in enumerate(self._candidates) if c.id == candidate_id),
             None,
@@ -302,28 +376,24 @@ class UMAPReverseSearch:
             return []
 
         z_target = self._Z[target_idx]
-
-        # Compute pairwise Euclidean distances from the target
-        dists = np.linalg.norm(self._Z - z_target, axis=1)
+        dists    = np.linalg.norm(self._Z - z_target, axis=1)
 
         neighbors = []
         for i, (c, d) in enumerate(zip(self._candidates, dists)):
-            # Skip the target itself and candidates outside the search radius
             if i == target_idx or d > radius:
                 continue
             neighbors.append({
-                "id": c.id,
-                "distance": float(d),
-                "frequency_mhz": c.frequency_hz / 1e6,
-                "band": getattr(c, "band", "?"),
-                "density_score": c.density_score,
-                "frequency_score": getattr(c, "frequency_score", None),
+                "id":               c.id,
+                "distance":         float(d),
+                "frequency_mhz":    c.frequency_hz / 1e6,
+                "band":             getattr(c, "band", "?"),
+                "density_score":    c.density_score,
+                "frequency_score":  getattr(c, "frequency_score", None),
                 "similarity_score": getattr(c, "similarity_score", None),
-                "umap_x": float(self._Z[i, 0]),
-                "umap_y": float(self._Z[i, 1]),
+                "umap_x":           float(self._Z[i, 0]),
+                "umap_y":           float(self._Z[i, 1]),
             })
 
-        # Sort by distance and cap at top_k
         neighbors.sort(key=lambda x: x["distance"])
         neighbors = neighbors[:top_k]
 
@@ -340,12 +410,10 @@ class UMAPReverseSearch:
         return neighbors
 
     def _check_loaded(self) -> None:
-        """Raise RuntimeError if load() has not been called yet."""
         if self._umap_model is None or not self._candidates:
             raise RuntimeError("Call load() before using this method.")
 
     def _load_umap(self):
-        """Load the trained UMAP model from disk."""
         if not self._umap_path.exists():
             raise FileNotFoundError(
                 f"UMAP model not found: {self._umap_path}\n"
@@ -353,10 +421,10 @@ class UMAPReverseSearch:
             )
         return joblib.load(self._umap_path)
 
-    def _load_candidates(self) -> List[Candidate]:
+    def _load_candidates(self) -> Tuple[List[Candidate], Set[str]]:
         """
-        Load real candidates directly from the configured real_png_dir.
-
+        Load all real candidates from real_png_dir.
+        Reads passed_candidates.pkl to know which ones passed the density filter.
         """
         real_dir = Path(paths["real_png_dir"])
         ds = Dataset(png_dir=real_dir, use_tqdm=True)
@@ -372,151 +440,27 @@ class UMAPReverseSearch:
             if getattr(c, "band", None) is None:
                 c.set_band(self._classify_band(c))
 
-        return candidates
-    
-    def _load_val_embedding(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        Load the UMAP embedding of the simulated validation set if available.
+        passed_ids: Set[str] = set()
+        pkl_path = self._results_dir / "passed_candidates.pkl"
+        if pkl_path.exists():
+            with open(pkl_path, "rb") as f:
+                passed_candidates, _ = pickle.load(f)
+            passed_ids = {c.id for c in passed_candidates}
+        else:
+            print("[WARN] passed_candidates.pkl not found — all candidates marked as rejected.")
+            print("       Run the density filter first (option 3).")
 
-        These points serve as the background cloud in the plot, providing
-        context on where the 64 ON/OFF categories are distributed in the
-        learned latent space.
-        """
+        return candidates, passed_ids
+
+    def _load_val_embedding(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         z_path = self._kde_dir / "umap_val_points.npy"
         y_path = self._kde_dir / "umap_val_labels.npy"
         if z_path.exists() and y_path.exists():
             return np.load(z_path), np.load(y_path)
         return None, None
 
-    def _add_background(self, fig: go.Figure, max_points: int) -> go.Figure:
-        """
-        Add the simulated validation set as a background scatter layer.
-
-        The three category groups (mixed/noise, only-ON, only-OFF) are
-        rendered as separate traces so they can be toggled in the legend.
-        """
-        Z_bg, y_bg = self._Z_val, self._y_val
-
-        # Subsample for rendering performance when the validation set is large
-        if len(Z_bg) > max_points:
-            idx = np.random.choice(len(Z_bg), max_points, replace=False)
-            Z_bg, y_bg = Z_bg[idx], y_bg[idx]
-
-        mask_on  = y_bg == self._only_on_cat
-        mask_off = y_bg == self._only_off_cat
-        mask_mix = ~mask_on & ~mask_off
-
-        # Render mixed/noise first so real candidates appear on top
-        fig.add_trace(go.Scattergl(
-            x=Z_bg[mask_mix, 0], y=Z_bg[mask_mix, 1],
-            mode="markers",
-            marker=dict(size=2, color="rgba(150,150,170,0.12)"),
-            name="Simulated (mixed/noise)",
-            hoverinfo="skip",
-        ))
-
-        if mask_off.any():
-            fig.add_trace(go.Scattergl(
-                x=Z_bg[mask_off, 0], y=Z_bg[mask_off, 1],
-                mode="markers",
-                marker=dict(size=3, color="rgba(255,80,100,0.35)"),
-                name="Simulated only-OFF",
-                hoverinfo="skip",
-            ))
-
-        if mask_on.any():
-            fig.add_trace(go.Scattergl(
-                x=Z_bg[mask_on, 0], y=Z_bg[mask_on, 1],
-                mode="markers",
-                marker=dict(size=3, color="rgba(100,255,80,0.35)"),
-                name="Simulated only-ON",
-                hoverinfo="skip",
-            ))
-
-        return fig
-
-    def _add_candidates(
-        self, fig: go.Figure, highlight_id: Optional[str]
-    ) -> go.Figure:
-        """
-        Add real candidates as colored markers, grouped by observing band.
-
-        Each band is a separate trace to allow toggling in the legend.
-        The highlighted candidate is added last so it renders on top.
-        """
-        for band, color in self._BAND_COLORS.items():
-            idxs = [
-                i for i, c in enumerate(self._candidates)
-                if getattr(c, "band", "OUT_OF_BAND") == band
-            ]
-            if not idxs:
-                continue
-
-            fig.add_trace(go.Scatter(
-                x=self._Z[idxs, 0],
-                y=self._Z[idxs, 1],
-                mode="markers",
-                marker=dict(
-                    size=10,
-                    color=color,
-                    line=dict(width=1.5, color="white"),
-                    symbol="circle",
-                ),
-                name=f"Real — {band} band",
-                text=[self._hover_text(self._candidates[i], self._Z[i]) for i in idxs],
-                customdata=[self._candidates[i].id for i in idxs],
-                hovertemplate="%{text}<extra></extra>",
-            ))
-
-        # Highlighted candidate rendered last (on top of all other traces)
-        if highlight_id is not None:
-            for i, c in enumerate(self._candidates):
-                if c.id == highlight_id:
-                    fig.add_trace(go.Scatter(
-                        x=[self._Z[i, 0]],
-                        y=[self._Z[i, 1]],
-                        mode="markers",
-                        marker=dict(
-                            size=22,
-                            color="yellow",
-                            symbol="star",
-                            line=dict(width=2, color="black"),
-                        ),
-                        name=f"★ {highlight_id}",
-                        hovertemplate=self._hover_text(c, self._Z[i]) + "<extra></extra>",
-                    ))
-                    break
-
-        return fig
-
-    @staticmethod
-    def _hover_text(c: Candidate, z: np.ndarray) -> str:
-        """Build the HTML hover tooltip string for a candidate."""
-        lines = [
-            f"<b>{c.id}</b>",
-            f"Target: {getattr(c, 'target', 'UNKNOWN')}",
-            f"Band: {getattr(c, 'band', '?')}",
-            f"Freq: {c.frequency_hz / 1e6:.3f} MHz",
-            f"Drift: {c.drift_hz_s:.4f} Hz/s",
-            f"UMAP: ({z[0]:.2f}, {z[1]:.2f})",
-        ]
-        if c.density_score is not None:
-            lines.append(f"Density score: {c.density_score:.4e}")
-        if getattr(c, "frequency_score", None) is not None:
-            lines.append(f"Freq score: {c.frequency_score:.4f}")
-        if getattr(c, "similarity_score", None) is not None:
-            lines.append(f"Sim score: {c.similarity_score:.4f}")
-        return "<br>".join(lines)
-    
     @staticmethod
     def _classify_band(candidate: Candidate) -> str:
-        """
-        Assign a band label based on the candidate central frequency.
-
-        SRT receivers:
-            C band:  4.2 - 7.7 GHz
-            K band: 18.0 - 26.5 GHz
-        """
         f = candidate.frequency_hz
         if 4.2e9 <= f <= 7.7e9:
             return "C"

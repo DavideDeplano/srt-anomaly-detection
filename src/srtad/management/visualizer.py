@@ -281,9 +281,12 @@ class Visualizer:
         else:
             smoothed = counts.astype(float)
         
-        # Find first local minimum (valley) from the left
+        # Find the main peak (maximum count)
+        peak_idx = np.argmax(smoothed)
+
+        # Find first local minimum (valley) AFTER the peak
         threshold = None
-        for i in range(1, len(smoothed) - 1):
+        for i in range(peak_idx + 1, len(smoothed) - 1):
             if smoothed[i] < smoothed[i-1] and smoothed[i] <= smoothed[i+1]:
                 # Found a valley — use its position as threshold
                 threshold = bin_centers[i]
@@ -479,3 +482,42 @@ class Visualizer:
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
         plt.close()
         self._logger.info(f"Saved similarity UMAP plot to {out_path}")
+
+    def plot_autoencoder_diagnostics(
+        self,
+        history,
+        mse_scores: np.ndarray,
+        mse_threshold: float,
+        threshold_pct: int,
+    ) -> None:
+        """Save three AE training diagnostic plots to results/figures/."""
+        ep = range(1, len(history.history["loss"]) + 1)
+
+        # Train vs val loss
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(ep, history.history["loss"],     label="Train")
+        ax.plot(ep, history.history["val_loss"], label="Validation")
+        ax.set(xlabel="Epoch", ylabel="MSE Loss", title="Autoencoder — Train vs Validation Loss")
+        ax.legend(); ax.grid(True, alpha=0.3); fig.tight_layout()
+        fig.savefig(self._output_dir / "ae_loss_curve.png", dpi=150)
+        plt.close(fig)
+
+        # Reconstruction error per epoch
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(ep, history.history["loss"], color="steelblue")
+        ax.set(xlabel="Epoch", ylabel="MSE", title="Autoencoder — Reconstruction Error per Epoch")
+        ax.grid(True, alpha=0.3); fig.tight_layout()
+        fig.savefig(self._output_dir / "ae_reconstruction_error.png", dpi=150)
+        plt.close(fig)
+
+        # MSE distribution on training data
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(mse_scores, bins=80, color="steelblue", edgecolor="none", alpha=0.8)
+        ax.axvline(mse_threshold, color="red", linestyle="--",
+                label=f"p{threshold_pct} = {mse_threshold:.5f}")
+        ax.set(xlabel="MSE", ylabel="Count", title="Autoencoder — MSE Distribution on Training Data")
+        ax.legend(); ax.grid(True, alpha=0.3); fig.tight_layout()
+        fig.savefig(self._output_dir / "ae_mse_distribution.png", dpi=150)
+        plt.close(fig)
+
+        self._logger.info("[VISUALIZER] AE diagnostic plots saved to %s", self._output_dir)

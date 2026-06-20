@@ -6,8 +6,9 @@ paths:
   models: models                        # Stored models (UMAP, KDE, GMM, etc.)
   results: results                      # Output files, rankings, figures
   logs: logs                            # Log files
-  real_png_dir: "/content/filippo/ML-SRT-SETI/results/inference"  # Directory with real candidate PNGs
-  #real_png_dir: "/content/hdd_esterno"
+  real_png_dir: "/content/davide/srt-anomaly-detection/data/real_candidates"   # Directory with real candidate PNGs
+  #real_png_dir: "/content/davide/srt-anomaly-detection/data/custom_candidates"
+  #real_png_dir: "/content/davide/srt-anomaly-detection/data/injection_test"
 
 simulation:
   output_cadences_dir: "simulated/cadences"
@@ -25,7 +26,7 @@ simulation:
   noise_mean: 10.0
 
   # Signal parameter ranges
-  amplitude_factor: [0.0, 4.0]
+  amplitude_factor: [4.0, 10.0]
   drift_rate_hz_s: [-4.0, 4.0]
   width_hz: [1.0, 20.0]
 
@@ -45,12 +46,9 @@ filters:
   # Density filter (UMAP + KDE on 15-D CC features)
   density:
     # UMAP hyperparameters (paper 25 - 0.01 - canberra)
-    # NOTE: try 50 - 0.1 - cosine
-    #           100 - 0.3 - correlation
-    #           75 - 0.2 - cosine
-    n_neighbors: 50
+    n_neighbors: 25
     min_dist: 0.1
-    umap_metric: "cosine"
+    umap_metric: "correlation"
     n_components: 2
 
     # KDE hyperparameters
@@ -69,8 +67,8 @@ filters:
   # Frequency filter (GMM bagging on per-band frequencies)
   frequency:
     # Number of GMM components per band
-    n_components_C: 100
-    n_components_K: 100
+    n_components_C: 10
+    n_components_K: 10
 
     # Bagging settings
     n_bags: 10                    # Number of GMMs per band
@@ -93,7 +91,14 @@ filters:
     # Scoring options
     rescale_0_1: true             # Normalize similarity score in [0,1]
 
+  # Autoencoder filter 
+  autoencoder:
+    model_path: "models/autoencoder.keras"
+    meta_path: "models/autoencoder_meta.joblib"
+    tuner_dir: "models/ae_tuner"
+
 # Logging
 logging:
   level: INFO
   file: logs/run.log
+

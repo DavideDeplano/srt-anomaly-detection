@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 from typing import Dict, List, Sequence, Tuple
 import math
 import random
 
-from src.srtad.core.candidate import Candidate
-from src.srtad.config import random_seed, ranker 
+from ..core.candidate import Candidate
+from ..config import random_seed, ranker
+
 
 class Ranker:
     """
@@ -15,6 +17,17 @@ class Ranker:
     - Top percentile by Similarity score per (target, band)
     - Top-K candidates considering both scores equally (combined)
     - Random control sample
+
+    Notes
+    -----
+    - In current dataset, target metadata is not available, so candidates
+      are expected to have target set to a constant placeholder ("UNKNOWN").
+      This collapses (target, band) stratification to band-only in practice.
+    - Candidates are expected to have:
+        - frequency_score (float in [0,1])
+        - similarity_score (float in [0,1])
+        - band (str) already set ("C", "K")
+        - target (str) already set ("UNKNOWN")
     """
 
     def __init__(self) -> None:
@@ -66,9 +79,12 @@ class Ranker:
     @staticmethod
     def _combined_score_equal(c: Candidate) -> float:
         """
-        Consider both scores equally.
+        Consider both scores equally — geometric mean: high only if BOTH
+        frequency and similarity are high.
         """
-        return 0.5 * float(c.frequency_score) + 0.5 * float(c.similarity_score)
+        f = max(float(c.frequency_score), 0.0)
+        s = max(float(c.similarity_score), 0.0)
+        return math.sqrt(f * s)
 
     def _group_by_target_band(self, candidates: Sequence[Candidate]) -> Dict[Tuple[str, str], List[Candidate]]:
         grouped: Dict[Tuple[str, str], List[Candidate]] = {}

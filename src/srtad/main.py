@@ -18,6 +18,7 @@ from src.srtad.ml.filters.similarity import SimilarityFilter
 from src.srtad.management.ranker import Ranker
 from src.srtad.management.visualizer import Visualizer
 from scripts.umap_reverse_search import UMAPReverseSearch
+from src.srtad.ml.filters.autoencoder import AutoencoderFilter
 
 try:
     from tqdm.auto import tqdm
@@ -330,16 +331,87 @@ def run_ranking(candidates: List[Candidate]) -> None:
     for name, group in samples.items():
         _write_csv(name, group)
 
+def run_fit_autoencoder() -> None:
+    """Train the AutoencoderFilter (Hyperband tuning) on simulated cadences."""
+    from pathlib import Path
+    from src.srtad.ml.filters.autoencoder import _TUNER_DIR, _X_CACHE_PATH
+
+    ae = AutoencoderFilter()
+
+    # Se X_cache esiste, passa un iterabile vuoto — fit() lo ignorerà
+    # e caricherà X direttamente dalla cache
+    if _X_CACHE_PATH.exists():
+        print(f"\n[AUTOENCODER] X cache found — skipping data loading.")
+        ae.fit(iter([]))  # iterabile vuoto, fit() usa la cache
+        print("[OK] Autoencoder training complete.")
+        return
+
+    # Altrimenti carica i dati normalmente
+    ds = Dataset(use_tqdm=True)
+    base_data_dir = Path(paths["data"])
+    cadences_dir = base_data_dir / sim_cfg["output_cadences_dir"]
+
+    print(f"\nLoading simulated cadences from: {cadences_dir}")
+    try:
+        simulated = ds.load_simulated_cadences(cadences_dir)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Please run option 1 (Generate synthetic cadences) first.")
+        return
+
+    print(f"Loaded {len(simulated)} simulated cadences.")
+    ae.fit(simulated)
+    print("[OK] Autoencoder training complete.")
+
+def run_autoencoder_filter() -> List[Candidate]:
+    """Score real candidates with the AutoencoderFilter and save results."""
+    real_dir = Path(paths["real_png_dir"])
+    ds = Dataset(png_dir=real_dir, use_tqdm=True)
+    candidates = ds.load()
+
+    if not candidates:
+        print("No real candidates found. Check real_png_dir in config.")
+        return []
+
+    ae = AutoencoderFilter()
+    ae.calibrate(candidates)
+
+    it = candidates
+    if tqdm is not None:
+        it = tqdm(candidates, desc="Autoencoder scoring", unit="candidate")
+
+    for c in it:
+        c.set_ae_score(ae.calculate(c))
+
+    results_dir = Path(paths["results"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    out_pkl = results_dir / "passed_candidates.pkl"
+    with open(out_pkl, "wb") as f:
+        pickle.dump((candidates, candidates), f)
+
+    out_csv = results_dir / "passed_autoencoder.csv"
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "ae_score", "frequency_mhz", "drift_hz_s", "source_path"])
+        for c in candidates:
+            w.writerow([
+                c.id,
+                f"{float(c.ae_score):.6f}" if c.ae_score is not None else "",
+                f"{float(c.frequency_hz) / 1e6:.6f}",
+                f"{float(c.drift_hz_s):.6f}",
+                str(c.source_path),
+            ])
+
+    print(f"[OK] {len(candidates)} candidates scored. Results saved to {out_csv}")
+    return candidates
+
 def main() -> None:
     """
     Command-line interface for the SRT anomaly detection pipeline.
 
-    Menu options:
-    1) Generate synthetic cadences
-    2) Train density model on simulated data
-    3) Run density filter on real candidates
-    4) Fit and apply frequency + similarity filters
-    0) Exit
+    Workflow — Pardo (DensityFilter):    1 → 2 → 3 → 4 → 5
+    Workflow — Autoencoder extension:    1 → 7 → 8 → 4 → 5
     """
     passed_candidates = []
     all_candidates = []
@@ -347,8 +419,13 @@ def main() -> None:
     while True:
         print("\n=== SRT Anomaly Detection ===")
         print("1) Generate Synthetic Cadences")
+        print("--- Pardo pipeline ---")
         print("2) Train Density Model (simulated data)")
         print("3) Run Density Filter")
+        print("--- Autoencoder extension ---")
+        print("7) Train Autoencoder (simulated data)")
+        print("8) Run Autoencoder Filter")
+        print("--- Common steps ---")
         print("4) Run Frequency + Similarity Filters")
         print("5) Run Ranking")
         print("6) UMAP Reverse Search")
@@ -369,9 +446,12 @@ def main() -> None:
         elif choice == "6":
             searcher = UMAPReverseSearch()
             searcher.load()
-            cid = input("Candidate ID to highlight (leave blank to skip): ").strip() or None
-            fig = searcher.plot(highlight_id=cid)
-            fig.show()
+            fig = searcher.plot()
+        elif choice == "7":
+            run_fit_autoencoder()
+        elif choice == "8":
+            passed_candidates = run_autoencoder_filter()
+            all_candidates = passed_candidates
         elif choice == "0":
           sys.exit(0)
         else:

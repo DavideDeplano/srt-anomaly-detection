@@ -8,12 +8,13 @@ Handles:
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from PIL import Image
 from sklearn.preprocessing import SplineTransformer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from skimage.transform import resize
+from joblib import Parallel, delayed
 import re
 import logging
 import numpy as np
@@ -25,6 +26,305 @@ try:
     from tqdm.auto import tqdm
 except ImportError:
     tqdm = None
+
+
+# ── module-level regex (compiled once, reused by worker processes) ────────────
+
+_RX_CANDIDATE = re.compile(
+    r"^candidate_\d+_(?P<freq>[\d.]+)MHz\.png$",
+    re.IGNORECASE,
+)
+_RX_GENERIC = re.compile(
+    r"(?:_dr_(?P<dr>[-+0-9.eE]+))?_freq_(?P<freq1>[-+0-9.eE]+)|_(?P<freq2>[\d.]+)MHz",
+    re.IGNORECASE,
+)
+_RX_TIC = re.compile(r"(?:^|[_\-])(?P<tic>TIC\d+)(?:[_\-]|$)", re.IGNORECASE)
+
+TARGET_H = 16
+TARGET_W = 80
+
+
+def _find_tic_in_parents(path: Path) -> Optional[str]:
+    """Walk up the directory hierarchy looking for a folder named TIC<digits>."""
+    for parent in path.parents:
+        if re.match(r"^TIC\d+$", parent.name, re.IGNORECASE):
+            return parent.name
+    return None
+
+
+def _find_separator_rows(arr: np.ndarray, white_threshold: float = 250) -> list:
+    """Find horizontal white separator rows."""
+    row_means = arr.mean(axis=1)
+    white_rows = np.where(row_means > white_threshold)[0]
+    
+    if len(white_rows) == 0:
+        return []
+    
+    separators = []
+    current_group = [white_rows[0]]
+    
+    for i in range(1, len(white_rows)):
+        if white_rows[i] - white_rows[i-1] <= 3:
+            current_group.append(white_rows[i])
+        else:
+            if len(current_group) >= 3:
+                separators.append(int(np.median(current_group)))
+            current_group = [white_rows[i]]
+    
+    if current_group and len(current_group) >= 3:
+        separators.append(int(np.median(current_group)))
+    
+    return separators
+
+
+def _crop_box(w: int, h: int, is_candidate_format: bool) -> Tuple[int, int, int, int]:
+    """Compute crop rectangle as fixed fractions of image width/height."""
+    if is_candidate_format:
+        return (
+            int(w * 0.0461),
+            int(h * 0.1163),
+            int(w * (1 - 0.086)),
+            int(h * (1 - 0.04)),
+        )
+    else:
+        return (
+            int(w * 0.0894),
+            int(h * 0.12),
+            int(w * (1 - 0.149)),
+            int(h * (1 - 0.03)),
+        )
+
+
+def _preprocess_spectrogram(data: np.ndarray) -> np.ndarray:
+    """
+    Apply normalization/cleaning steps to a 2D spectrogram array.
+
+    Steps:
+    1) Time normalization
+    2) DC spike removal
+    3) Bandpass correction via spline + ridge regression
+    """
+    data = np.asarray(data, dtype=np.float64)
+    data = np.maximum(data, 1e-9)
+
+    time_means = np.mean(data, axis=1, keepdims=True)
+    data = data / np.maximum(time_means, 1e-9)
+
+    H, W = data.shape
+    dc_index = W // 2
+    if 0 < dc_index < W - 1:
+        data[:, dc_index] = (data[:, dc_index - 1] + data[:, dc_index + 1]) / 2.0
+
+    bandpass = np.mean(data, axis=0)
+    X = np.arange(W, dtype=np.float64).reshape(-1, 1)
+    y = bandpass.astype(np.float64)
+
+    try:
+        model = make_pipeline(
+            SplineTransformer(n_knots=20, degree=3, include_bias=False),
+            Ridge(alpha=1.0),
+        )
+        model.fit(X, y)
+        smooth_bandpass = model.predict(X).astype(np.float64)
+        smooth_bandpass = np.nan_to_num(smooth_bandpass, nan=1.0, posinf=1.0, neginf=1.0)
+        smooth_bandpass = np.maximum(smooth_bandpass, 1e-9)
+        data = data / smooth_bandpass.reshape(1, -1)
+    except Exception:
+        pass
+
+    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    return data
+
+
+def _minmax_panel(data: np.ndarray) -> np.ndarray:
+    """
+    Per-panel min-max normalization to [0, 1], WITHOUT bandpass correction.
+
+    Used to build the similarity-filter representation. The bandpass step in
+    `_preprocess_spectrogram` divides out persistent narrowband lines (which is
+    exactly the morphology of a non-drifting candidate); this normalization
+    preserves them.
+    """
+    q = np.asarray(data, dtype=np.float64)
+    q = q - q.min()
+    m = q.max()
+    if m > 0:
+        q = q / m
+    return q
+
+
+def _load_single_png(png: Path):
+    """
+    Load, crop, preprocess and resize a single PNG into a Candidate.
+
+    Returns a Candidate on success, or None on failure/skip.
+    This function is module-level so joblib can pickle it for multiprocessing.
+    """
+    is_candidate_format = bool(_RX_CANDIDATE.match(png.name))
+
+    if is_candidate_format:
+        m = _RX_CANDIDATE.match(png.name)
+        freq_hz = float(m.group("freq")) * 1e6
+        drift_hz_s = 0.0
+    else:
+        m = _RX_GENERIC.search(png.name)
+        if not m:
+            return None, str(png)  # skipped
+        if m.group("freq1") is not None:
+            freq_hz = float(m.group("freq1").strip(".")) * 1e6
+            drift_hz_s = float(m.group("dr")) if m.group("dr") else 0.0
+        else:
+            freq_hz = float(m.group("freq2").strip(".")) * 1e6
+            drift_hz_s = 0.0
+
+    # Target extraction
+    tic_match = _RX_TIC.search(png.name)
+    if tic_match:
+        target = tic_match.group("tic")
+    else:
+        target = _find_tic_in_parents(png) or png.parent.name
+
+    # Notch filter
+    if (1.2e9 <= freq_hz <= 1.33e9) or (2.3e9 <= freq_hz <= 2.36e9):
+        return None, None  # silently skipped
+
+    # Load image
+    try:
+        with Image.open(png) as im:
+            im = im.convert("L")
+            w, h = im.size
+            arr = np.asarray(im, dtype=np.float64)
+    except Exception:
+        return None, None
+
+    panels = []
+
+    # ========== CANDIDATE FORMAT (h5_to_candidates.py: NO white separators) ==========
+    if is_candidate_format:
+        H, W = arr.shape
+        
+        # Global crop
+        left   = int(W * 0.0894)
+        right  = int(W * (1 - 0.149))
+        top    = int(H * 0.12)
+        bottom = int(H * (1 - 0.03))
+        
+        cropped = arr[top:bottom, left:right]
+        CH, _ = cropped.shape
+        
+        # Uniform split (no white separators)
+        step = CH // 6
+        if step == 0:
+            return None, None
+        
+        for i in range(6):
+            panel = cropped[i * step:(i + 1) * step, :]
+            panels.append(panel)
+
+    # ========== TIC FORMAT: separator detection with uniform-split fallback ==========
+    else:
+        H, W = arr.shape
+        
+        # Global crop
+        left   = int(W * 0.12)
+        right  = int(W * 0.88)
+        top    = int(H * 0.04)
+        bottom = int(H * 0.95)
+        
+        cropped = arr[top:bottom, left:right]
+        CH, _ = cropped.shape
+        
+        # Find separators
+        separators = _find_separator_rows(cropped, white_threshold=250)
+        
+        if len(separators) >= 5:
+            # ---- Filippo's plots: white separator bands between panels ----
+            separators = separators[:5]
+            boundaries = [0] + separators + [CH]
+            
+            # Extract panels, skipping white bands
+            for i in range(6):
+                start = boundaries[i]
+                end = boundaries[i+1]
+                
+                if i > 0:
+                    start += 25
+                if i < 5:
+                    end -= 25
+                
+                if end <= start:
+                    return None, None
+                
+                panel = cropped[start:end, :]
+                panels.append(panel)
+        else:
+            # ---- h5_to_candidates.py plots: adjacent panels, no separators ----
+            # Re-crop with margins measured for this layout (excludes title,
+            # axis labels, and colorbar)
+            left   = int(W * 0.0517)
+            right  = int(W * (1 - 0.0827))
+            top    = int(H * 0.1179)
+            bottom = int(H * (1 - 0.0296))
+            
+            cropped = arr[top:bottom, left:right]
+            CH, _ = cropped.shape
+            
+            step = CH // 6
+            if step == 0:
+                return None, None
+            
+            for i in range(6):
+                panel = cropped[i * step:(i + 1) * step, :]
+                panels.append(panel)
+
+    # ========== COMMON: build TWO representations ==========
+    # Keep the raw cropped panels for the min-max (similarity) representation.
+    panels_crop = [np.asarray(p, dtype=np.float64) for p in panels]
+
+    def _resize_panel(p: np.ndarray) -> np.ndarray:
+        return resize(
+            p,
+            (TARGET_H, TARGET_W),
+            order=1,
+            mode="reflect",
+            anti_aliasing=True,
+            preserve_range=True,
+        )
+
+    # (A) bandpassed (Pardo-style) -> used by density / frequency filters.
+    #     Behavior unchanged with respect to the previous pipeline.
+    try:
+        panels_bp = [_preprocess_spectrogram(p) for p in panels_crop]
+    except Exception:
+        return None, None
+
+    min_h = min(p.shape[0] for p in panels_bp)
+    panels_bp = [p[:min_h, :] for p in panels_bp]
+
+    try:
+        cadence = np.stack([_resize_panel(p) for p in panels_bp], axis=0)
+    except ValueError:
+        return None, None
+
+    # (B) per-panel min-max, NO bandpass -> used by the similarity filter.
+    min_h2 = min(p.shape[0] for p in panels_crop)
+    panels_mm = [_minmax_panel(p[:min_h2, :]) for p in panels_crop]
+
+    try:
+        cadence_raw = np.stack([_resize_panel(p) for p in panels_mm], axis=0)
+    except ValueError:
+        return None, None
+
+    candidate = Candidate(
+        id=png.stem,
+        frequency_hz=freq_hz,
+        drift_hz_s=drift_hz_s,
+        cadence=cadence,
+        source_path=png,
+    )
+    candidate.set_cadence_raw(cadence_raw)
+    candidate.set_target(target if target else "UNKNOWN")
+    return candidate, None
 
 
 class Dataset:
@@ -52,27 +352,15 @@ class Dataset:
         self._logger = logging.getLogger("srtad.dataset")
         self._use_tqdm = bool(use_tqdm)
 
-        # Regex used to parse target, drift rate and frequency from the PNG filename
-        self._rx_candidate = re.compile(
-            r"^candidate_\d+_(?P<freq>[\d.]+)MHz_P[\d.]+\.png$",
-            re.IGNORECASE
-        )
-
-        self._rx_generic = re.compile(
-            r"(?:_dr_(?P<dr>[-+0-9.eE]+))?_freq_(?P<freq1>[-+0-9.eE]+)|_(?P<freq2>[\d.]+)MHz",
-            re.IGNORECASE
-        )
-
-        self._rx_tic = re.compile(r"(?:^|[_\-])(?P<tic>TIC\d+)(?:[_\-]|$)", re.IGNORECASE)
+        self._rx_candidate = _RX_CANDIDATE
+        self._rx_generic = _RX_GENERIC
+        self._rx_tic = _RX_TIC
 
     @staticmethod
-    def _find_tic_in_parents(path: Path) -> str | None:
+    def _find_tic_in_parents(path: Path) -> Optional[str]:
         """Walk up the directory hierarchy looking for a folder named TIC<digits>."""
-        for parent in path.parents:
-            if re.match(r"^TIC\d+$", parent.name, re.IGNORECASE):
-                return parent.name
-        return None
-    
+        return _find_tic_in_parents(path)
+
     def load_simulated_cadences(
         self,
         cadences_dir: Path | str,
@@ -111,7 +399,6 @@ class Dataset:
 
         self._logger.info("Loading synthetic cadences from %s", cadences_dir)
 
-        # Build an index: cadence_id -> metadata dictionary
         metadata_index: Dict[str, Dict[str, Any]] = {}
 
         with open(log_path, "r", newline="") as f:
@@ -127,7 +414,6 @@ class Dataset:
                         "panels": [],
                     }
 
-                # Store per-slot metadata from the CSV row
                 metadata_index[cid]["panels"].append(
                     {
                         "slot": int(row["slot"]),
@@ -146,13 +432,11 @@ class Dataset:
                     }
                 )
 
-        # Ensure panel metadata is ordered by slot index
         for cid in metadata_index:
             metadata_index[cid]["panels"].sort(key=lambda d: d["slot"])
 
         cadences: List[Tuple[str, np.ndarray, Dict[str, Any]]] = []
 
-        # Iterate over all cadence IDs from the metadata index and load the .npy tensors
         cid_iter = metadata_index.items()
         if self._use_tqdm and tqdm is not None:
             cid_iter = tqdm(cid_iter, desc="Loading synthetic cadence tensors")
@@ -162,7 +446,6 @@ class Dataset:
             if not tensor_path.exists():
                 raise FileNotFoundError(f"Missing cadence tensor: {tensor_path}")
 
-            # Load tensor and apply preprocessing panel-by-panel (6 panels expected)
             raw_tensor = np.load(tensor_path)
             preprocessed_panels = []
             for i in range(6):
@@ -176,95 +459,19 @@ class Dataset:
         self._logger.info("Loaded %d synthetic cadences from %s", len(cadences), cadences_dir)
         return cadences
 
-    def _crop_box(self, w: int, h: int, is_candidate_format: bool) -> tuple[int, int, int, int]:
-        """
-        Compute the crop rectangle as fixed fractions of image width/height.
-
-        This removes fixed margins from the PNG image before further processing.
-        """
-        if is_candidate_format:
-            return (
-                int(w * 0.0461),        # left margin
-                int(h * 0.1163),        # top margin
-                int(w * (1 - 0.086)),   # right margin
-                int(h * (1 - 0.04))     # bottom margin
-            )
-        else:
-            return (
-                int(w * 0.0894),        # left margin
-                int(h * 0.044),         # top margin
-                int(w * (1 - 0.149)),   # right margin
-                int(h * (1 - 0.067)),   # bottom margin
-            )
+    def _crop_box(self, w: int, h: int, is_candidate_format: bool) -> Tuple[int, int, int, int]:
+        """Compute the crop rectangle as fixed fractions of image width/height."""
+        return _crop_box(w, h, is_candidate_format)
 
     def _preprocess_spectrogram(self, data: np.ndarray) -> np.ndarray:
-        """
-        Apply normalization/cleaning steps to a 2D spectrogram array.
-
-        Steps performed:
-        1) Time normalization: each time row is divided by its mean over frequency.
-        2) DC spike removal: the central frequency channel is replaced with the
-           average of its immediate neighbors.
-        3) Bandpass correction: divide by a smoothed bandpass estimate obtained
-           via a spline transformer + ridge regression pipeline.
-
-        Notes:
-        - The bandpass smoothing is best-effort: on failure, the input data is
-          left as-is after steps (1) and (2), and a warning is logged.
-        - Final outputs are forced to finite values via np.nan_to_num.
-        """
-        # Convert to float and avoid zeros
-        data = np.asarray(data, dtype=np.float64)
-        data = np.maximum(data, 1e-9)
-
-        # 1) Time normalization: normalize each row by its frequency-mean
-        time_means = np.mean(data, axis=1, keepdims=True)
-        data = data / np.maximum(time_means, 1e-9)
-
-        # 2) DC spike removal: replace center channel with neighbor average
-        H, W = data.shape
-        dc_index = W // 2
-        if 0 < dc_index < W - 1:
-            data[:, dc_index] = (data[:, dc_index - 1] + data[:, dc_index + 1]) / 2.0
-
-        # 3) Bandpass correction using a spline + ridge regression model
-        bandpass = np.mean(data, axis=0)
-
-        X = np.arange(W, dtype=np.float64).reshape(-1, 1)
-        y = bandpass.astype(np.float64)
-
-        try:
-            model = make_pipeline(
-                SplineTransformer(n_knots=20, degree=3, include_bias=False),
-                Ridge(alpha=1.0),
-            )
-            model.fit(X, y)
-            smooth_bandpass = model.predict(X).astype(np.float64)  # shape (W,)
-
-            # Safety: prevent division by tiny/invalid values
-            smooth_bandpass = np.nan_to_num(smooth_bandpass, nan=1.0, posinf=1.0, neginf=1.0)
-            smooth_bandpass = np.maximum(smooth_bandpass, 1e-9)
-
-            data = data / smooth_bandpass.reshape(1, -1)
-
-        except Exception as e:
-            self._logger.warning(f"Scikit-learn B-spline fitting failed: %s", e)
-
-        # Final safety: enforce finite output values.
-        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-        return data
+        """Apply normalization/cleaning steps to a 2D spectrogram array."""
+        return _preprocess_spectrogram(data)
 
     def load(self, png_dir: str | Path | None = None) -> List[Candidate]:
         """
         Load real PNG candidates from disk and convert them into Candidate objects.
 
-        For each PNG file:
-        - Parse drift and frequency from filename via regex.
-        - Skip files in the hard-coded notch ranges.
-        - Open the image, convert to grayscale, crop margins, and preprocess.
-        - Split vertically into 6 panels using integer division of the height.
-        - Resize each panel to a fixed shape (TARGET_H, TARGET_W).
-        - Stack panels into a cadence tensor of shape (6, TARGET_H, TARGET_W).
+        Uses joblib.Parallel for parallel loading across all available CPU cores.
         """
         search_dir = Path(png_dir) if png_dir is not None else self._png_dir
 
@@ -272,119 +479,23 @@ class Dataset:
             self._logger.warning("Data path not found: %s", search_dir)
             return []
 
+        png_files = sorted(search_dir.rglob("*.png"))
+        self._logger.info("Found %d PNG files in %s", len(png_files), search_dir)
+
+        results = Parallel(n_jobs=-1, prefer="threads")(
+            delayed(_load_single_png)(png)
+            for png in tqdm(png_files, desc="Loading real PNG candidates")
+        )
+
         candidates: List[Candidate] = []
         skipped_files: List[str] = []
 
-        png_iter = sorted(search_dir.rglob("*.png"))
-        if self._use_tqdm and tqdm is not None:
-            png_iter = tqdm(png_iter, desc="Loading real PNG candidates")
+        for candidate, skipped in results:
+            if candidate is not None:
+                candidates.append(candidate)
+            elif skipped is not None:
+                skipped_files.append(skipped)
 
-        for png in png_iter:
-            is_candidate_format = bool(self._rx_candidate.match(png.name))
-
-            if is_candidate_format:
-                m = self._rx_candidate.match(png.name)
-                freq_hz = float(m.group("freq")) * 1e6
-                drift_hz_s = 0.0
-            else:
-                m = self._rx_generic.search(png.name)
-                if not m:
-                    self._logger.warning("Skipping file with unexpected name: %s", png.name)
-                    skipped_files.append(str(png))
-                    continue
-                if m.group("freq1") is not None:
-                    freq_hz = float(m.group("freq1").strip(".")) * 1e6
-                    drift_hz_s = float(m.group("dr")) if m.group("dr") else 0.0
-                else:
-                    freq_hz = float(m.group("freq2").strip(".")) * 1e6
-                    drift_hz_s = 0.0
-
-            # Target extraction 
-            tic_match = self._rx_tic.search(png.name)
-            if tic_match:
-                target = tic_match.group("tic")
-            else:
-                target = self._find_tic_in_parents(png) or png.parent.name
-                
-            # Skip candidates falling into hard-coded notch frequency ranges
-            if (1.2e9 <= freq_hz <= 1.33e9) or (2.3e9 <= freq_hz <= 2.36e9):
-                self._logger.info(
-                    "Skipping candidate in notch filter range: %.6f MHz", freq_hz / 1e6
-                )
-                continue
-
-            # Load image, convert to grayscale, crop fixed margins, and preprocess
-            try:
-                with Image.open(png) as im:
-                    im = im.convert("L")  # grayscale: (H, W)
-                    w, h = im.size
-                    cropped = im.crop(self._crop_box(w, h, is_candidate_format))
-                    arr = np.asarray(cropped, dtype=np.float64)
-            except Exception as exc:
-                self._logger.error("Failed to load or process image %s: %s", png, exc)
-                continue
-
-            # Split the processed image into 6 vertical panels
-            # Note: step is computed via integer division; if H is not divisible by 6,
-            # the remainder rows are not included in the panels
-            H = arr.shape[0]
-            step = H // 6
-            if step == 0:
-                self._logger.warning(
-                    "Image too small to split into 6 panels: %s (H=%d)", png, H
-                )
-                continue
-
-            panels = [arr[i * step:(i + 1) * step, :] for i in range(6)]
-
-            try:
-                panels = [self._preprocess_spectrogram(p) for p in panels]
-            except Exception as exc:
-                self._logger.error("Preprocess failed for %s: %s", png, exc)
-                continue
-
-            # Fixed output size for each panel
-            TARGET_H = 16
-            TARGET_W = 80
-
-            # Align panel heights to a common value before resizing
-            min_h = min(p.shape[0] for p in panels)
-            panels = [p[:min_h, :] for p in panels]
-
-            # Resize each panel to (TARGET_H, TARGET_W)
-            panels_resized = [
-                resize(
-                    p,
-                    (TARGET_H, TARGET_W),
-                    order=1,
-                    mode="reflect",
-                    anti_aliasing=True,
-                    preserve_range=True
-                )
-                for p in panels
-            ]
-
-            # Stack resized panels into a cadence tensor: (6, TARGET_H, TARGET_W)
-            try:
-                cadence = np.stack(panels_resized, axis=0)  # shape: (6, H, W)
-            except ValueError as exc:
-                self._logger.error(
-                    "Failed to stack panels into cadence for %s: %s", png, exc
-                )
-                continue
-
-            # Create a Candidate using the filename stem as identifier
-            candidate = Candidate(
-                id=png.stem,
-                frequency_hz=freq_hz,
-                drift_hz_s=drift_hz_s,
-                cadence=cadence,
-                source_path=png
-            )
-            candidate.set_target(target if target else "UNKNOWN")
-            candidates.append(candidate)
-
-        # Save skipped files report
         if skipped_files:
             skipped_path = Path("results") / "skipped_files.txt"
             skipped_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,7 +505,8 @@ class Dataset:
                     f.write(f"{p}\n")
             self._logger.warning(
                 "%d files skipped due to unexpected filename format. See: %s",
-                len(skipped_files), skipped_path
+                len(skipped_files),
+                skipped_path,
             )
 
         self._logger.info("Loaded %d real PNG candidates from %s", len(candidates), search_dir)

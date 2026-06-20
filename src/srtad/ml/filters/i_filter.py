@@ -7,9 +7,9 @@ anomaly detection pipeline.
 
 from abc import ABC, abstractmethod
 from typing import Iterable
+from ...config import random_seed
+from ...core.candidate import Candidate
 
-from src.srtad.config import random_seed
-from src.srtad.core.candidate import Candidate
 
 class IFilter(ABC):
     """
