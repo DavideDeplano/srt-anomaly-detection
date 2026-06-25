@@ -29,6 +29,12 @@ except ImportError:
 _FREQ = None
 _SIM = None
 
+# Threshold used by the AutoencoderFilter to promote candidates to the next pipeline stages.
+# Chosen on production data to yield ~2267 candidates (top 1.26% of ae_score distribution),
+# comparable in volume to the DensityFilter output (1089) for fair comparison in Capitolo 5.
+AE_THRESHOLD = 0.99
+
+
 def run_fit_density() -> None:
     """
     Train the DensityFilter (UMAP + KDE) using simulated cadences.
@@ -66,13 +72,13 @@ def run_density_filter() -> tuple:
     real_dir = Path(paths["real_png_dir"])
     ds = Dataset(png_dir=real_dir, use_tqdm=True)
     density = DensityFilter()
-    
+
     candidates = ds.load()
-    
+
     # Collect scores for ALL candidates
     all_p_only_on = []      # P_only_on for every candidate (for Figure 4 plot)
     passed_p_only_on = []   # P_only_on only where argmax == only_on
-    
+
     try:
         it = candidates
         if tqdm is not None:
@@ -81,10 +87,10 @@ def run_density_filter() -> tuple:
         for candidate in it:
             score, p_on, best_cat = density.calculate_with_details(candidate)
             candidate.set_density_score(score)
-            
+
             # Collect P_only_on for ALL candidates (for the histogram)
             all_p_only_on.append(p_on)
-            
+
             # Collect only-on scores where argmax matched
             if score > 0:
                 passed_p_only_on.append(score)
@@ -95,13 +101,13 @@ def run_density_filter() -> tuple:
 
     all_p_only_on = np.array(all_p_only_on, dtype=float)
     passed_p_only_on = np.array(passed_p_only_on, dtype=float)
-    
+
     # Save arrays for later analysis
     results_dir = Path(paths["results"])
     results_dir.mkdir(parents=True, exist_ok=True)
     np.save(results_dir / "density_all_p_only_on.npy", all_p_only_on)
     np.save(results_dir / "density_passed_p_only_on.npy", passed_p_only_on)
-    
+
     # Plot and compute adaptive threshold
     viz = Visualizer()
     threshold = viz.plot_density_histogram(
@@ -110,17 +116,17 @@ def run_density_filter() -> tuple:
         threshold=None,  # let it compute adaptively
         filename="density_real_hist.png"
     )
-    
+
     print(f"[DENSITY] Adaptive threshold: {threshold:.6f}")
     print(f"[DENSITY] Candidates with argmax=Cat42: {len(passed_p_only_on)}")
     print(f"[DENSITY] Candidates with P_only_on > 0: {np.sum(all_p_only_on > 0)}")
-    
+
     # Apply threshold
     passed_candidates = [
         c for c in candidates
         if c.density_score >= threshold
     ]
-    
+
     print(f"[DENSITY] Passed threshold: {len(passed_candidates)} / {len(candidates)}")
 
     # CSV output
@@ -146,7 +152,7 @@ def run_density_filter() -> tuple:
     with open(out_pkl, "wb") as f:
         pickle.dump((passed_candidates, candidates), f)
     print(f"[OK] Saved candidates to: {out_pkl}")
-    
+
     return passed_candidates, candidates
 
 def _get_filters() -> Tuple[FrequencyFilter, SimilarityFilter]:
@@ -158,7 +164,7 @@ def _get_filters() -> Tuple[FrequencyFilter, SimilarityFilter]:
     """
     global _FREQ, _SIM
     if _FREQ is None:
-        _FREQ = FrequencyFilter()   
+        _FREQ = FrequencyFilter()
     if _SIM is None:
         _SIM = SimilarityFilter()
     return _FREQ, _SIM
@@ -182,7 +188,7 @@ def run_frequency_similarity_filters(
 ):
     """
     Fit and apply FrequencyFilter and SimilarityFilter on density-passed candidates.
-    
+
     Adaptive behavior:
     - Frequency bin cut is skipped when candidate count is below 200
       (paper designed for ~10^6 candidates; aggressive binning on small
@@ -205,7 +211,7 @@ def run_frequency_similarity_filters(
     # The paper's 5% noisy-bin cut was designed for ~10^6 candidates.
     # With < 200 candidates it removes too many; skip it.
     MIN_CANDIDATES_FOR_FREQ_CUT = 200
-    
+
     if len(passed_candidates) >= MIN_CANDIDATES_FOR_FREQ_CUT:
         freq_hz = np.array([c.frequency_hz for c in passed_candidates])
         n_bins = min(200, max(10, len(passed_candidates) // 10))
@@ -283,8 +289,8 @@ def run_ranking(candidates: List[Candidate]) -> None:
         else:
             print("No candidates available. Run filters first.")
             return
-    
-    # Exclude bands not modeled 
+
+    # Exclude bands not modeled
     candidates = [c for c in candidates if c.band != "OUT_OF_BAND"]
 
     r = Ranker()
@@ -363,15 +369,23 @@ def run_fit_autoencoder() -> None:
     ae.fit(simulated)
     print("[OK] Autoencoder training complete.")
 
-def run_autoencoder_filter() -> List[Candidate]:
-    """Score real candidates with the AutoencoderFilter and save results."""
+def run_autoencoder_filter() -> Tuple[List[Candidate], List[Candidate]]:
+    """
+    Score real candidates with the AutoencoderFilter and promote those above AE_THRESHOLD.
+
+    Mirrors the contract of run_density_filter:
+    - scores all candidates
+    - applies a threshold to promote a subset (passed_candidates)
+    - saves the pickle as (passed_candidates, all_candidates)
+    - returns (passed_candidates, all_candidates)
+    """
     real_dir = Path(paths["real_png_dir"])
     ds = Dataset(png_dir=real_dir, use_tqdm=True)
     candidates = ds.load()
 
     if not candidates:
         print("No real candidates found. Check real_png_dir in config.")
-        return []
+        return [], []
 
     ae = AutoencoderFilter()
     ae.calibrate(candidates)
@@ -383,13 +397,25 @@ def run_autoencoder_filter() -> List[Candidate]:
     for c in it:
         c.set_ae_score(ae.calculate(c))
 
+    # ---- Apply AE threshold to build the passed subset ----
+    passed_candidates = [
+        c for c in candidates
+        if c.ae_score is not None and c.ae_score >= AE_THRESHOLD
+    ]
+    print(f"[AUTOENCODER] Threshold: {AE_THRESHOLD}")
+    print(f"[AUTOENCODER] Passed threshold: {len(passed_candidates)} / {len(candidates)}")
+
     results_dir = Path(paths["results"])
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    # Save pickle in the same format as run_density_filter:
+    # (passed_candidates, all_candidates) — needed by options 4 and 5.
     out_pkl = results_dir / "passed_candidates.pkl"
     with open(out_pkl, "wb") as f:
-        pickle.dump((candidates, candidates), f)
+        pickle.dump((passed_candidates, candidates), f)
+    print(f"[OK] Saved {len(passed_candidates)} passed + {len(candidates)} total candidates to {out_pkl}")
 
+    # CSV: tutti i candidati con i loro score (per diagnostica e tesi)
     out_csv = results_dir / "passed_autoencoder.csv"
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -404,7 +430,7 @@ def run_autoencoder_filter() -> List[Candidate]:
             ])
 
     print(f"[OK] {len(candidates)} candidates scored. Results saved to {out_csv}")
-    return candidates
+    return passed_candidates, candidates
 
 def main() -> None:
     """
@@ -450,8 +476,7 @@ def main() -> None:
         elif choice == "7":
             run_fit_autoencoder()
         elif choice == "8":
-            passed_candidates = run_autoencoder_filter()
-            all_candidates = passed_candidates
+            passed_candidates, all_candidates = run_autoencoder_filter()
         elif choice == "0":
           sys.exit(0)
         else:

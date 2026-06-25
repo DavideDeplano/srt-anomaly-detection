@@ -558,10 +558,10 @@ class AutoencoderFilter(IFilter):
             return
 
         mse_arr = np.array(mse_list)
-        self._mse_min = float(np.percentile(mse_arr, 5))
-        self._mse_max = float(np.percentile(mse_arr, 95))
+        self._mse_min = float(np.percentile(mse_arr, 1))
+        self._mse_max = float(np.percentile(mse_arr, 99))
         print(
-            f"[AUTOENCODER] Calibrated on {len(mse_list)} real candidates | "
-            f"mse_min(p5)={self._mse_min:.6f} | mse_max(p95)={self._mse_max:.6f}"
-        )
+          f"[AUTOENCODER] Calibrated on {len(mse_list)} real candidates | "
+          f"mse_min(p1)={self._mse_min:.6f} | mse_max(p99)={self._mse_max:.6f}"
+      )
         self._save_models()
