@@ -57,6 +57,10 @@ Filter with *S*<sub>sim</sub> = 1.00, recurring across three adjacent windows of
 Visual inspection confirms a narrowband signal coherent across the three ON panels and absent
 from the OFF panels.
 
+![TIC 147576037 at 18197.55 MHz](results/figures/TIC147576037_18197.552109MHz.png)
+
+*Cadence of TIC 147576037 at 18197.55 MHz (K band), top of the Similarity Filter with S_sim = 1.00. The narrowband signal is coherent across the three ON panels and absent from the OFF panels.*
+
 **The pipeline is a screening tool, not a classifier.** No ground truth exists for SRT candidates:
 the output is a prioritised list for human inspection, not a detection claim.
 
@@ -92,6 +96,12 @@ counted are those whose argmax falls on the only-on category.
 Both models recover fixed-position injections; only NCC-max recovers drifting ones. Drift
 tolerance depends on window width: roughly 0.9 Hz/s at 4096 channels, 0.3 Hz/s at 640.
 
+| ![Pearson features](results/figures/umap_kde_validation_pearson.png) | ![NCC-max features](results/figures/umap_kde_validation_NCC-max.png) |
+| --- | --- |
+| Pearson (zero-lag) features | NCC-max features |
+
+*UMAP validation embedding with KDE contours, before and after replacing the feature extractor. Green marks the only-on category (42), red the only-off category (21).*
+
 ### 2. Adaptive threshold for the Density Filter
 
 The original promotion threshold is a fixed value (0.0618) calibrated on the probability
@@ -100,6 +110,10 @@ statistics. Here the threshold is recomputed at every run: the histogram of *P*(
 smoothed and the first local minimum after the main peak is taken as the cut, falling back to the
 25th percentile when the distribution shows no clear valley. On the SRT production run this
 yielded *P\** = 0.0987 (the fallback was not triggered).
+
+![Adaptive threshold](results/figures/density_real_hist.png)
+
+*Distribution of P(only-on) over the 180,242 real candidates. Left: all candidates, log scale. Right: the 1,452 with argmax on the only-on category, showing the two modes separated by the valley at 0.0987 that the adaptive logic detects.*
 
 ### 3. `cadence_raw` representation for the Similarity Filter
 
@@ -473,6 +487,10 @@ immediate way to check whether the promoted candidates actually fell in the expe
 latent space. It reuses the UMAP model trained on simulated data and projects the real candidates
 into the same plane with no retraining, overlaying the simulated training set coloured by category
 and the real candidates coloured by band. Selecting a point shows its metadata and source path.
+
+![UMAP Reverse Search](results/figures/reverse_overview.png)
+
+*Real SRT candidates (C band in cyan, K band in violet) projected into the UMAP space of the trained model, overlaid on the simulated training set coloured by category.*
 
 ---
 
