@@ -19,6 +19,7 @@ from src.srtad.management.ranker import Ranker
 from src.srtad.management.visualizer import Visualizer
 from scripts.umap_reverse_search import UMAPReverseSearch
 from src.srtad.ml.filters.autoencoder import AutoencoderFilter
+from src.srtad.ml.filters.rf_filter import RandomForestFilter
 
 try:
     from tqdm.auto import tqdm
@@ -33,6 +34,12 @@ _SIM = None
 # Chosen on production data to yield ~2267 candidates (top 1.26% of ae_score distribution),
 # comparable in volume to the DensityFilter output (1089) for fair comparison in Capitolo 5.
 AE_THRESHOLD = 0.99
+
+# Threshold used by the RandomForestFilter to promote candidates.
+# The RF outputs class probabilities in [0, 1]; the default 0.5 is a natural
+# decision boundary for a balanced binary classifier and can be overridden
+# from config/default.yaml under filters.rf_filter.threshold.
+RF_THRESHOLD = float(filters.get("rf_filter", {}).get("threshold", 0.5))
 
 
 def run_fit_density() -> None:
@@ -432,12 +439,98 @@ def run_autoencoder_filter() -> Tuple[List[Candidate], List[Candidate]]:
     print(f"[OK] {len(candidates)} candidates scored. Results saved to {out_csv}")
     return passed_candidates, candidates
 
+def run_fit_rf_filter() -> None:
+    """
+    Train the RandomForestFilter (grid search + 5-fold CV) on synthetic cadences.
+
+    Data collection is handled internally by RandomForestFilter.fit(), which
+    scans the simulated cadences directory directly via filename regex
+    (bypasses the CSV log). An empty iterator is passed to satisfy the
+    IFilter interface — the argument is not used.
+    """
+    rf = RandomForestFilter()
+    rf.fit(iter([]))
+    print("[OK] RandomForestFilter training complete.")
+
+def run_rf_filter() -> Tuple[List[Candidate], List[Candidate]]:
+    """
+    Score real candidates with the RandomForestFilter and promote those above RF_THRESHOLD.
+
+    Mirrors the contract of run_autoencoder_filter:
+    - loads all real candidates from paths["real_png_dir"]
+    - scores each candidate with rf.calculate() (probabilistic output in [0, 1])
+    - applies RF_THRESHOLD (default 0.5) to build the passed subset
+    - saves pickle as (passed_candidates, all_candidates)
+    - saves diagnostic CSV with rf_score for all candidates
+    - returns (passed_candidates, all_candidates)
+    """
+    real_dir = Path(paths["real_png_dir"])
+    ds = Dataset(png_dir=real_dir, use_tqdm=True)
+    candidates = ds.load()
+
+    if not candidates:
+        print("No real candidates found. Check real_png_dir in config.")
+        return [], []
+
+    rf = RandomForestFilter()
+
+    it = candidates
+    if tqdm is not None:
+        it = tqdm(candidates, desc="RandomForest scoring", unit="candidate")
+
+    for c in it:
+        score = rf.calculate(c)
+        # RF score stored as attribute; also mirrored to ae_score slot so that
+        # downstream steps (4, 5) that already read c.ae_score keep working when
+        # RF is used as a drop-in replacement for the Autoencoder.
+        c.rf_score = score
+        try:
+            c.set_ae_score(score)
+        except Exception:
+            pass
+
+    passed_candidates = [
+        c for c in candidates
+        if getattr(c, "rf_score", None) is not None and c.rf_score >= RF_THRESHOLD
+    ]
+    print(f"[RF_FILTER] Threshold: {RF_THRESHOLD}")
+    print(f"[RF_FILTER] Passed threshold: {len(passed_candidates)} / {len(candidates)}")
+
+    results_dir = Path(paths["results"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save pickle in the same format as run_density_filter / run_autoencoder_filter:
+    # (passed_candidates, all_candidates). This overwrites passed_candidates.pkl
+    # so that options 4 and 5 pick up the RF-promoted set automatically.
+    out_pkl = results_dir / "passed_candidates.pkl"
+    with open(out_pkl, "wb") as f:
+        pickle.dump((passed_candidates, candidates), f)
+    print(f"[OK] Saved {len(passed_candidates)} passed + {len(candidates)} total candidates to {out_pkl}")
+
+    out_csv = results_dir / "passed_rf.csv"
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "rf_score", "frequency_mhz", "drift_hz_s", "source_path"])
+        for c in candidates:
+            score = getattr(c, "rf_score", None)
+            w.writerow([
+                c.id,
+                f"{float(score):.6f}" if score is not None else "",
+                f"{float(c.frequency_hz) / 1e6:.6f}",
+                f"{float(c.drift_hz_s):.6f}",
+                str(c.source_path),
+            ])
+
+    print(f"[OK] {len(candidates)} candidates scored. Results saved to {out_csv}")
+    return passed_candidates, candidates
+
 def main() -> None:
     """
     Command-line interface for the SRT anomaly detection pipeline.
 
-    Workflow — Pardo (DensityFilter):    1 → 2 → 3 → 4 → 5
-    Workflow — Autoencoder extension:    1 → 7 → 8 → 4 → 5
+    Workflow — Pardo (DensityFilter):        1 → 2 → 3 → 4 → 5
+    Workflow — Autoencoder extension:        1 → 7 → 8 → 4 → 5
+    Workflow — RandomForest extension:       1 → 9 → 10 → 4 → 5
     """
     passed_candidates = []
     all_candidates = []
@@ -451,6 +544,9 @@ def main() -> None:
         print("--- Autoencoder extension ---")
         print("7) Train Autoencoder (simulated data)")
         print("8) Run Autoencoder Filter")
+        print("--- RandomForest extension ---")
+        print("9) Train RandomForest Filter (simulated data)")
+        print("10) Run RandomForest Filter")
         print("--- Common steps ---")
         print("4) Run Frequency + Similarity Filters")
         print("5) Run Ranking")
@@ -477,6 +573,10 @@ def main() -> None:
             run_fit_autoencoder()
         elif choice == "8":
             passed_candidates, all_candidates = run_autoencoder_filter()
+        elif choice == "9":
+            run_fit_rf_filter()
+        elif choice == "10":
+            passed_candidates, all_candidates = run_rf_filter()
         elif choice == "0":
           sys.exit(0)
         else:
