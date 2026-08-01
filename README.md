@@ -21,8 +21,8 @@ Software product of a bachelor's thesis in *Informatica Applicata e Data Analyti
 **Università degli Studi di Cagliari**, developed during a curricular internship at
 **INAF – Osservatorio Astronomico di Cagliari** and defended on 24 July 2026.
 
-> **Adattamento e validazione di una pipeline di rilevamento di anomalie per dati
-> radioastronomici SETI del Sardinia Radio Telescope**
+> **[Adattamento e validazione di una pipeline di rilevamento di anomalie per dati
+> radioastronomici SETI del Sardinia Radio Telescope](docs/Tesi_Davide_Deplano.pdf)**
 
 | Role | Name |
 | --- | --- |
@@ -529,8 +529,9 @@ storage.
 ## Reference
 
 Pardo et al. (2025), *Using Anomaly Detection to Search for Technosignatures in Breakthrough
-Listen Observations*, The Astronomical Journal, 170, 12. A copy is included in
-[`docs/paper/`](docs/paper/).
+Listen Observations*, The Astronomical Journal, 170:12 (9pp). DOI:
+[10.3847/1538-3881/add52b](https://doi.org/10.3847/1538-3881/add52b). Open Access; a copy is
+included in [`docs/paper/`](docs/paper/).
 
 ---
 
