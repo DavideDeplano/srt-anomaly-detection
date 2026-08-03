@@ -24,13 +24,6 @@ Software product of a bachelor's thesis in *Informatica Applicata e Data Analyti
 > **[Adattamento e validazione di una pipeline di rilevamento di anomalie per dati
 > radioastronomici SETI del Sardinia Radio Telescope](docs/Tesi_Davide_Deplano.pdf)**
 
-| Role | Name |
-| --- | --- |
-| Author | Davide Deplano |
-| Supervisors | Dott.ssa Maria Ilaria Lunesu, Dott. Andrea Pinna, Dott.ssa Maura Pilia |
-| Technical reference (INAF–OAC) | Dott. Alessandro Cabras |
-| Technical reference (Berkeley SETI Research Center) | Dott. Vishal Gajjar |
-
 The scientific question is transferability. A pipeline calibrated on one instrument and one set
 of observing bands is not automatically applicable to another: SRT operates in higher bands than
 those used by Pardo et al., and is not currently part of a systematic SETI observing programme.
