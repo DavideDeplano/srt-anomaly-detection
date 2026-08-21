@@ -528,16 +528,6 @@ included in [`docs/paper/`](docs/paper/).
 
 ---
 
-## Acknowledgements
-
-Developed at INAF – Osservatorio Astronomico di Cagliari, with observational data from the
-Sardinia Radio Telescope. Thanks to Maria Ilaria Lunesu, Andrea Pinna and Maura Pilia for the
-supervision, and to Alessandro Cabras (INAF–OAC) and Vishal Gajjar (Berkeley SETI Research Center)
-for serving as technical references throughout the internship and for the scientific discussion
-that made this work possible.
-
----
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
